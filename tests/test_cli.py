@@ -22,6 +22,11 @@ class CliParserTests(unittest.TestCase):
         self.assertEqual(catalog_search.catalog_action, "search")
         self.assertEqual(catalog_search.source, "modrinth")
         self.assertEqual(catalog_search.kind, "mod")
+        datapack_search = parser.parse_args(
+            ["catalog", "search", "home", "terrain", "--source", "curseforge", "--kind", "datapack"]
+        )
+        self.assertEqual(datapack_search.kind, "datapack")
+        self.assertEqual(datapack_search.source, "curseforge")
 
     def test_optional_port_can_be_disabled_explicitly(self):
         parser = build_parser()

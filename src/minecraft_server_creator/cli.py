@@ -350,10 +350,11 @@ def _install_catalog_project(
 ) -> None:
     profile = manager.get_profile(profile_slug)
     if manager.services.is_active(profile):
-        raise ManagerError("Stoppe den Server vor der Installation von Mods oder Plugins.")
+        raise ManagerError("Stoppe den Server vor der Installation von Mods, Plugins oder Datapacks.")
+    destination = catalog.destination(profile, kind)
     plan = catalog.prepare_install(source, kind, project_id, profile)
     print(f"{plan.project_title} — {plan.file_version}")
-    print(f"Quelle: {plan.source}; Datei: {plan.file_name}; Ziel: {kind}s/")
+    print(f"Quelle: {plan.source}; Datei: {plan.file_name}; Ziel: {destination}/")
     print(f"Projektseite: {plan.project_url}")
     if plan.required_dependencies:
         print(
@@ -364,10 +365,12 @@ def _install_catalog_project(
         print("Kompatibilitätshinweis: Arclight unterstützt Bukkit/Spigot; Paper-only-Plugins sind nicht abgedeckt. Prüfe die Herstellerangaben.")
     if kind == "mod" and source == "curseforge":
         print("Kompatibilitätshinweis: CurseForge liefert keinen verlässlichen Server-/Client-Filter; prüfe die Herstellerangaben.")
+    if kind == "datapack":
+        print("Nach dem Start im Server prüfen: /datapack list available; falls nötig mit /datapack enable file/<Dateiname> aktivieren.")
     if not assume_yes:
         if not sys.stdin.isatty():
             raise ManagerError("Nichtinteraktive Kataloginstallationen benötigen die ausdrückliche Option --yes.")
-        if not _yes_no("Diese JAR-Datei installieren?", default=False):
+        if not _yes_no("Diese Katalogdatei installieren?", default=False):
             print("Installation abgebrochen.")
             return
     installed = catalog.install(plan, profile)
@@ -401,7 +404,7 @@ def _catalog_command(manager: ServerManager, args: argparse.Namespace) -> None:
         for project in projects:
             print(f"{project.project_id}\t{project.title} — {project.summary} [{project.downloads:,} Downloads]")
             print(f"  {project.url}")
-        print("\nZum Installieren: mcsc catalog install <server> <projekt-id> --source <quelle> --kind <mod|plugin>")
+        print("\nZum Installieren: mcsc catalog install <server> <projekt-id> --source <quelle> --kind <mod|plugin|datapack>")
         return
     if args.catalog_action == "install":
         _install_catalog_project(
@@ -417,9 +420,9 @@ def _catalog_command(manager: ServerManager, args: argparse.Namespace) -> None:
 
 def _catalog_menu(manager: ServerManager) -> None:
     profile = manager.get_profile(_choose_profile(manager))
-    kind = input("Installieren (mod/plugin): ").strip().lower()
-    if kind not in {"mod", "plugin"}:
-        print("Abgebrochen: Bitte 'mod' oder 'plugin' eingeben.")
+    kind = input("Installieren (mod/plugin/datapack): ").strip().lower()
+    if kind not in {"mod", "plugin", "datapack"}:
+        print("Abgebrochen: Bitte 'mod', 'plugin' oder 'datapack' eingeben.")
         return
     source = input("Katalog (modrinth/curseforge): ").strip().lower()
     if source not in {"modrinth", "curseforge"}:
@@ -460,7 +463,7 @@ def _menu(manager: ServerManager, store: ConfigStore) -> None:
             " 10) IP-Adressen und Ports anzeigen\n"
             " 11) Grundeinstellungen / Standardports\n"
             " 12) RCON-Spielertools (nur lokale Verbindung)\n"
-            " 13) Mod-/Plugin-Katalog (Modrinth/CurseForge)\n"
+            " 13) Mod-/Plugin-/Datapack-Katalog (Modrinth/CurseForge)\n"
             "  0) Beenden"
         )
         choice = input("Auswahl: ").strip()
@@ -569,19 +572,19 @@ def build_parser() -> argparse.ArgumentParser:
     set_item.add_argument("count", type=int, nargs="?", default=1, help="Stückzahl 1–64")
     set_item.add_argument("--yes", action="store_true", help="Inventaränderung ausdrücklich bestätigen (nichtinteraktiv erforderlich)")
 
-    catalog = sub.add_parser("catalog", help="Mods/Plugins über Modrinth oder CurseForge suchen und installieren")
+    catalog = sub.add_parser("catalog", help="Mods, Plugins und Datapacks über Modrinth oder CurseForge suchen und installieren")
     catalog_sub = catalog.add_subparsers(dest="catalog_action", required=True)
-    catalog_search = catalog_sub.add_parser("search", help="Kompatible Mods/Plugins suchen")
+    catalog_search = catalog_sub.add_parser("search", help="Kompatible Mods, Plugins oder Datapacks suchen")
     catalog_search.add_argument("server", help="Servername oder Profil-Slug")
     catalog_search.add_argument("query", help="Suchbegriff")
     catalog_search.add_argument("--source", choices=("modrinth", "curseforge"), required=True)
-    catalog_search.add_argument("--kind", choices=("mod", "plugin"), required=True)
+    catalog_search.add_argument("--kind", choices=("mod", "plugin", "datapack"), required=True)
     catalog_search.add_argument("--limit", type=int, default=10, help="Maximale Trefferzahl (1–50)")
     catalog_install = catalog_sub.add_parser("install", help="Neueste stabile kompatible Datei installieren")
     catalog_install.add_argument("server", help="Servername oder Profil-Slug")
     catalog_install.add_argument("project_id", help="Projekt-ID aus der Suche")
     catalog_install.add_argument("--source", choices=("modrinth", "curseforge"), required=True)
-    catalog_install.add_argument("--kind", choices=("mod", "plugin"), required=True)
+    catalog_install.add_argument("--kind", choices=("mod", "plugin", "datapack"), required=True)
     catalog_install.add_argument("--yes", action="store_true", help="Dateiinstallation ausdrücklich bestätigen")
     catalog_list = catalog_sub.add_parser("list", help="Kataloginstallationen eines Profils anzeigen")
     catalog_list.add_argument("server", help="Servername oder Profil-Slug")

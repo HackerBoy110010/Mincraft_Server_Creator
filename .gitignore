@@ -27,3 +27,4 @@ MinecraftServers/
 **/backups/
 **/plugins/*.jar
 **/mods/*.jar
+**/datapacks/

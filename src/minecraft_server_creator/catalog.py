@@ -12,9 +12,11 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 import zipfile
+import zlib
 
 from .minecraft import USER_AGENT, download_file
 from .models import ServerProfile
+from .properties import read_properties
 
 MODRINTH_API = "https://api.modrinth.com/v2"
 CURSEFORGE_API = "https://api.curseforge.com/v1"
@@ -22,6 +24,7 @@ CURSEFORGE_GAME_ID = 432
 CURSEFORGE_MOD_CLASS = 6
 CURSEFORGE_PLUGIN_CLASS = 5
 CURSEFORGE_LOADERS = {"forge": 1, "fabric": 4, "neoforge": 6}
+CURSEFORGE_PROJECT_PATHS = {"mod": "mc-mods", "plugin": "bukkit-plugins", "datapack": "data-packs"}
 
 
 class CatalogError(RuntimeError):
@@ -71,8 +74,10 @@ SERVER_ENVIRONMENTS = frozenset(
 
 
 def _allowed_profile_loader(profile: ServerProfile, kind: str) -> tuple[str, ...]:
-    if kind not in {"mod", "plugin"}:
-        raise CatalogError("Der Katalog unterstützt nur Mods und Plugins.")
+    if kind not in {"mod", "plugin", "datapack"}:
+        raise CatalogError("Der Katalog unterstützt nur Mods, Plugins und Datapacks.")
+    if kind == "datapack":
+        return ("datapack",)
     if kind == "plugin":
         if profile.server_type != "arclight":
             raise CatalogError("Plugins können hier nur auf Arclight-Profilen installiert werden.")
@@ -119,7 +124,7 @@ def _request_json(url: str, host: str, *, api_key: str | None = None) -> Any:
         raise CatalogError(f"Katalogdaten konnten nicht von {host} geladen werden: {exc}") from exc
 
 
-def _safe_filename(filename: Any) -> str:
+def _safe_filename(filename: Any, *, extension: str = ".jar") -> str:
     if not isinstance(filename, str) or not filename or len(filename) > 240:
         raise CatalogError("Der Katalog lieferte keinen gültigen Dateinamen.")
     windows_device = filename.split(".", 1)[0].upper() in {
@@ -134,9 +139,9 @@ def _safe_filename(filename: Any) -> str:
         or filename.endswith((".", " "))
         or any(ord(char) < 32 or ord(char) == 127 for char in filename)
         or windows_device
-        or not filename.lower().endswith(".jar")
+        or not filename.lower().endswith(extension.lower())
     ):
-        raise CatalogError("Es werden nur sichere, portable JAR-Dateinamen ohne Pfadbestandteile akzeptiert.")
+        raise CatalogError(f"Es werden nur sichere, portable Dateinamen mit Endung {extension} ohne Pfadbestandteile akzeptiert.")
     return filename
 
 
@@ -195,6 +200,90 @@ def _query_url(base: str, route: str, params: dict[str, Any]) -> str:
     return f"{base}{route}?{urlencode(params)}"
 
 
+def _validate_datapack_archive(path: Path) -> None:
+    try:
+        with zipfile.ZipFile(path) as archive:
+            try:
+                metadata = archive.getinfo("pack.mcmeta")
+            except KeyError as exc:
+                raise CatalogError("Das Datapack-ZIP braucht pack.mcmeta direkt im Stammverzeichnis.") from exc
+            if metadata.file_size > 1_000_000:
+                raise CatalogError("pack.mcmeta überschreitet die zulässige Größe.")
+            with archive.open(metadata) as stream:
+                raw = stream.read(1_000_001)
+            if len(raw) > 1_000_000:
+                raise CatalogError("pack.mcmeta überschreitet die zulässige Größe.")
+            document = json.loads(raw.decode("utf-8"))
+    except CatalogError:
+        raise
+    except (
+        OSError,
+        UnicodeError,
+        json.JSONDecodeError,
+        zipfile.BadZipFile,
+        RuntimeError,
+        EOFError,
+        zlib.error,
+        NotImplementedError,
+    ) as exc:
+        raise CatalogError(f"Das Datapack-ZIP oder pack.mcmeta ist ungültig: {exc}") from exc
+    pack = document.get("pack") if isinstance(document, dict) else None
+    if not isinstance(pack, dict):
+        raise CatalogError("pack.mcmeta enthält keinen gültigen pack-Abschnitt.")
+    pack_format = pack.get("pack_format")
+    valid_format = isinstance(pack_format, int) and not isinstance(pack_format, bool) and pack_format > 0
+    for field in ("min_format", "max_format"):
+        value = pack.get(field)
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            valid_format = True
+        elif isinstance(value, list) and value and all(
+            isinstance(part, int) and not isinstance(part, bool) and part >= 0 for part in value
+        ) and any(part > 0 for part in value):
+            valid_format = True
+    if not valid_format:
+        raise CatalogError("pack.mcmeta enthält keinen erkennbaren Datapack-Format-Eintrag.")
+
+
+def _datapack_world_name(profile: ServerProfile) -> str:
+    properties = read_properties(Path(profile.server_dir) / "server.properties")
+    world_name = properties.get("level-name", "world").strip()
+    device = world_name.split(".", 1)[0].upper() in {
+        "CON", "PRN", "AUX", "NUL", *(f"COM{n}" for n in range(1, 10)), *(f"LPT{n}" for n in range(1, 10))
+    }
+    if (
+        not world_name
+        or len(world_name) > 120
+        or world_name in {".", ".."}
+        or Path(world_name).name != world_name
+        or "/" in world_name
+        or "\\" in world_name
+        or any(char in world_name for char in '<>:"|?*')
+        or any(ord(char) < 32 or ord(char) == 127 for char in world_name)
+        or world_name.endswith((".", " "))
+        or device
+    ):
+        raise CatalogError("level-name muss ein sicherer einzelner Weltordnername ohne Pfadbestandteile sein.")
+    return world_name
+
+
+def _datapack_target(profile: ServerProfile) -> tuple[str, Path]:
+    root = Path(profile.server_dir).resolve()
+    world_name = _datapack_world_name(profile)
+    world_dir = root / world_name
+    if world_dir.is_symlink():
+        raise CatalogError("Der Weltordner darf kein symbolischer Link sein.")
+    world_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if world_dir.resolve().parent != root:
+        raise CatalogError("Der Weltordner liegt nicht sicher innerhalb des Serverprofils.")
+    datapacks_dir = world_dir / "datapacks"
+    if datapacks_dir.is_symlink():
+        raise CatalogError("Der Datapack-Ordner darf kein symbolischer Link sein.")
+    datapacks_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if datapacks_dir.resolve().parent != world_dir:
+        raise CatalogError("Der Datapack-Ordner liegt nicht sicher innerhalb der Welt.")
+    return f"{world_name}/datapacks", datapacks_dir
+
+
 class ModrinthCatalog:
     def search(self, query: str, kind: str, profile: ServerProfile, limit: int) -> list[CatalogProject]:
         loaders = _allowed_profile_loader(profile, kind)
@@ -225,9 +314,10 @@ class ModrinthCatalog:
                 project_types = [hit.get("project_type")]
             if kind not in project_types and hit.get("project_type") != kind:
                 continue
-            environments = hit.get("environment")
-            if not isinstance(environments, list) or not set(environments).intersection(SERVER_ENVIRONMENTS):
-                continue
+            if kind != "datapack":
+                environments = hit.get("environment")
+                if not isinstance(environments, list) or not set(environments).intersection(SERVER_ENVIRONMENTS):
+                    continue
             project_id = str(hit.get("project_id") or "")
             slug = str(hit.get("slug") or project_id)
             if not project_id:
@@ -254,9 +344,10 @@ class ModrinthCatalog:
         if not isinstance(project, dict):
             raise CatalogError(f"Das angegebene Modrinth-Projekt ist kein {kind}.")
         project_type = project.get("project_type")
-        # Modrinth's primary project_type may stay "mod" even for projects with plugin
-        # releases. The actual compatible loader on the selected version separates the types.
-        if project_type not in {"mod", "plugin"}:
+        # Modrinth may report plugins (and some datapack projects) through the
+        # primary "mod" project type. The selected version's loader is authoritative.
+        allowed_project_types = {"mod", "plugin"} if kind == "plugin" else {"mod", "datapack"}
+        if project_type not in allowed_project_types:
             raise CatalogError(f"Das angegebene Modrinth-Projekt ist kein {kind}.")
         params = {
             "loaders": json.dumps(list(loaders), separators=(",", ":")),
@@ -281,16 +372,20 @@ class ModrinthCatalog:
             version_loaders = {str(item).lower() for item in loaders_data}
             if not version_loaders.intersection(loaders):
                 continue
-            if version.get("environment") not in SERVER_ENVIRONMENTS:
+            if kind != "datapack" and version.get("environment") not in SERVER_ENVIRONMENTS:
                 continue
             files = version.get("files")
             if not isinstance(files, list):
                 continue
-            candidates = [item for item in files if isinstance(item, dict) and str(item.get("filename", "")).lower().endswith(".jar")]
+            extension = ".zip" if kind == "datapack" else ".jar"
+            candidates = [
+                item for item in files
+                if isinstance(item, dict) and str(item.get("filename", "")).lower().endswith(extension)
+            ]
             if not candidates:
                 continue
             selected = next((item for item in candidates if item.get("primary") is True), candidates[0])
-            filename = _safe_filename(selected.get("filename"))
+            filename = _safe_filename(selected.get("filename"), extension=extension)
             checksum, algorithm = _checksum(selected.get("hashes"), source="modrinth")
             project_slug = str(project.get("slug") or project_id)
             dependencies_data = version.get("dependencies")
@@ -330,16 +425,66 @@ class CurseForgeCatalog:
 
     @staticmethod
     def _loader_id(profile: ServerProfile, kind: str) -> int | None:
-        if kind == "plugin":
+        if kind in {"plugin", "datapack"}:
+            _allowed_profile_loader(profile, kind)
             return None
         loaders = _allowed_profile_loader(profile, kind)
         return CURSEFORGE_LOADERS[loaders[0]]
 
+    def _datapack_scope(self) -> tuple[int, int | None]:
+        result = _request_json(
+            _query_url(f"{CURSEFORGE_API}/categories", "", {"gameId": CURSEFORGE_GAME_ID}),
+            "api.curseforge.com",
+            api_key=self.api_key,
+        )
+        categories = result.get("data") if isinstance(result, dict) else None
+        if not isinstance(categories, list):
+            raise CatalogError("CurseForge lieferte keine gültige Kategorienliste für Datapacks.")
+
+        def is_datapack_category(category: dict[str, Any]) -> bool:
+            names = (category.get("name"), category.get("slug"))
+            normalized = {
+                re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+                for value in names
+                if isinstance(value, str)
+            }
+            return bool(normalized.intersection({"data-pack", "data-packs", "datapack", "datapacks"}))
+
+        matches = [item for item in categories if isinstance(item, dict) and is_datapack_category(item)]
+        if not matches:
+            raise CatalogError("CurseForge meldet keine Data Packs-Kategorie; die Suche wurde sicherheitshalber abgebrochen.")
+        matches.sort(key=lambda item: not bool(item.get("isClass")))
+        category = matches[0]
+        category_id = category.get("id")
+        if not isinstance(category_id, int) or category_id <= 0:
+            raise CatalogError("CurseForge lieferte eine ungültige ID für die Data Packs-Kategorie.")
+        if category.get("isClass") is True:
+            return category_id, None
+        class_id = category.get("classId")
+        if not isinstance(class_id, int) or class_id <= 0:
+            raise CatalogError("CurseForge lieferte keine übergeordnete Klasse für die Data Packs-Kategorie.")
+        return class_id, category_id
+
+    @staticmethod
+    def _matches_datapack_category(project: dict[str, Any], class_id: int, category_id: int | None) -> bool:
+        if project.get("classId") != class_id:
+            return False
+        if category_id is None:
+            return True
+        categories = project.get("categories")
+        return isinstance(categories, list) and any(
+            isinstance(item, dict) and item.get("id") == category_id for item in categories
+        )
+
     def search(self, query: str, kind: str, profile: ServerProfile, limit: int) -> list[CatalogProject]:
         loader_id = self._loader_id(profile, kind)
+        datapack_scope = self._datapack_scope() if kind == "datapack" else None
+        expected_class = datapack_scope[0] if datapack_scope else (
+            CURSEFORGE_MOD_CLASS if kind == "mod" else CURSEFORGE_PLUGIN_CLASS
+        )
         params: dict[str, Any] = {
             "gameId": CURSEFORGE_GAME_ID,
-            "classId": CURSEFORGE_MOD_CLASS if kind == "mod" else CURSEFORGE_PLUGIN_CLASS,
+            "classId": expected_class,
             "gameVersion": profile.minecraft_version,
             "searchFilter": query,
             "sortField": 2,
@@ -347,6 +492,8 @@ class CurseForgeCatalog:
             "pageSize": limit,
             "index": 0,
         }
+        if datapack_scope is not None and datapack_scope[1] is not None:
+            params["categoryId"] = datapack_scope[1]
         if loader_id is not None:
             params["modLoaderType"] = loader_id
         url = _query_url(f"{CURSEFORGE_API}/mods/search", "", params)
@@ -354,9 +501,10 @@ class CurseForgeCatalog:
         if not isinstance(data, dict) or not isinstance(data.get("data"), list):
             raise CatalogError("CurseForge lieferte ein unerwartetes Suchergebnis.")
         projects: list[CatalogProject] = []
-        expected_class = CURSEFORGE_MOD_CLASS if kind == "mod" else CURSEFORGE_PLUGIN_CLASS
         for hit in data["data"]:
             if not isinstance(hit, dict) or hit.get("classId") != expected_class:
+                continue
+            if datapack_scope is not None and not self._matches_datapack_category(hit, *datapack_scope):
                 continue
             project_id = str(hit.get("id") or "")
             slug = str(hit.get("slug") or project_id)
@@ -372,7 +520,7 @@ class CurseForgeCatalog:
                     str(hit.get("name") or slug),
                     str(hit.get("summary") or ""),
                     int(hit.get("downloadCount") or 0),
-                    str(links.get("websiteUrl") or f"https://www.curseforge.com/minecraft/{'mc-mods' if kind == 'mod' else 'bukkit-plugins'}/{slug}"),
+                    str(links.get("websiteUrl") or f"https://www.curseforge.com/minecraft/{CURSEFORGE_PROJECT_PATHS[kind]}/{slug}"),
                 )
             )
         return projects
@@ -381,12 +529,17 @@ class CurseForgeCatalog:
         if not re.fullmatch(r"[0-9]{1,20}", project_id):
             raise CatalogError("CurseForge-Projekt-IDs müssen numerisch sein.")
         loader_id = self._loader_id(profile, kind)
+        datapack_scope = self._datapack_scope() if kind == "datapack" else None
+        expected_class = datapack_scope[0] if datapack_scope else (
+            CURSEFORGE_MOD_CLASS if kind == "mod" else CURSEFORGE_PLUGIN_CLASS
+        )
         mod_id = int(project_id)
         project_result = _request_json(f"{CURSEFORGE_API}/mods/{mod_id}", "api.curseforge.com", api_key=self.api_key)
         project = project_result.get("data") if isinstance(project_result, dict) else None
-        expected_class = CURSEFORGE_MOD_CLASS if kind == "mod" else CURSEFORGE_PLUGIN_CLASS
         if not isinstance(project, dict) or project.get("classId") != expected_class:
             raise CatalogError(f"Das angegebene CurseForge-Projekt ist kein {kind}.")
+        if datapack_scope is not None and not self._matches_datapack_category(project, *datapack_scope):
+            raise CatalogError(f"Das angegebene CurseForge-Projekt gehört nicht zur Data Packs-Kategorie.")
         params: dict[str, Any] = {"gameVersion": profile.minecraft_version, "pageSize": 50, "index": 0}
         if loader_id is not None:
             params["modLoaderType"] = loader_id
@@ -395,6 +548,7 @@ class CurseForgeCatalog:
         files = file_result.get("data") if isinstance(file_result, dict) else None
         if not isinstance(files, list):
             raise CatalogError("CurseForge lieferte eine ungültige Dateiliste.")
+        extension = ".zip" if kind == "datapack" else ".jar"
         stable_files = sorted(
             (
                 item for item in files
@@ -403,18 +557,18 @@ class CurseForgeCatalog:
                 and item.get("isAvailable", True)
                 and isinstance(item.get("gameVersions"), list)
                 and profile.minecraft_version in item["gameVersions"]
-                and str(item.get("fileName", "")).lower().endswith(".jar")
+                and str(item.get("fileName", "")).lower().endswith(extension)
             ),
             key=lambda item: str(item.get("fileDate") or ""),
             reverse=True,
         )
         if not stable_files:
             raise CatalogError(
-                f"Für CurseForge-Projekt {project_id} wurde keine stabile JAR-Datei für Minecraft "
-                f"{profile.minecraft_version} und den gewählten Loader gefunden."
+                f"Für CurseForge-Projekt {project_id} wurde keine stabile {extension.upper()}-Datei für Minecraft "
+                f"{profile.minecraft_version} gefunden."
             )
         selected = stable_files[0]
-        filename = _safe_filename(selected.get("fileName"))
+        filename = _safe_filename(selected.get("fileName"), extension=extension)
         download_url = selected.get("downloadUrl")
         if not download_url:
             file_id = selected.get("id")
@@ -439,7 +593,10 @@ class CurseForgeCatalog:
         )
         slug = str(project.get("slug") or project_id)
         project_links = project.get("links") if isinstance(project.get("links"), dict) else {}
-        project_url = str(project_links.get("websiteUrl") or f"https://www.curseforge.com/minecraft/{'mc-mods' if kind == 'mod' else 'bukkit-plugins'}/{slug}")
+        project_url = str(
+            project_links.get("websiteUrl")
+            or f"https://www.curseforge.com/minecraft/{CURSEFORGE_PROJECT_PATHS[kind]}/{slug}"
+        )
         return InstallPlan(
             "curseforge",
             kind,
@@ -458,7 +615,7 @@ class CurseForgeCatalog:
 
 
 class ContentCatalog:
-    """Search Modrinth/CurseForge and safely install compatible JAR files."""
+    """Search Modrinth/CurseForge and safely install compatible content files."""
 
     def __init__(self, *, curseforge_api_key: str | None = None) -> None:
         self.modrinth = ModrinthCatalog()
@@ -486,13 +643,21 @@ class ContentCatalog:
     def prepare_install(self, source: str, kind: str, project_id: str, profile: ServerProfile) -> InstallPlan:
         return self._provider(source).prepare_install(project_id.strip(), kind, profile)
 
+    @staticmethod
+    def destination(profile: ServerProfile, kind: str) -> str:
+        _allowed_profile_loader(profile, kind)
+        if kind == "datapack":
+            return f"{_datapack_world_name(profile)}/datapacks"
+        return "mods" if kind == "mod" else "plugins"
+
     def install(self, plan: InstallPlan, profile: ServerProfile) -> Path:
         if plan.minecraft_version != profile.minecraft_version:
             raise CatalogError("Die Installationsauswahl passt nicht mehr zur Minecraft-Version dieses Profils.")
         _allowed_profile_loader(profile, plan.kind)
         if plan.source not in {"modrinth", "curseforge"}:
             raise CatalogError("Unbekannte Katalogquelle in der Installationsauswahl.")
-        filename = _safe_filename(plan.file_name)
+        extension = ".zip" if plan.kind == "datapack" else ".jar"
+        filename = _safe_filename(plan.file_name, extension=extension)
         download_url = _validate_download_url(plan.source, plan.download_url)
         supported_algorithms = {"sha512", "sha1"} if plan.source == "modrinth" else {"sha1", "md5"}
         if plan.algorithm not in supported_algorithms:
@@ -504,13 +669,17 @@ class ContentCatalog:
             source=plan.source,
         )
         root = Path(profile.server_dir).resolve()
-        folder_name = "mods" if plan.kind == "mod" else "plugins"
-        target_dir = root / folder_name
-        if target_dir.is_symlink():
-            raise CatalogError(f"Der Zielordner {folder_name} darf kein symbolischer Link sein.")
-        target_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-        if target_dir.resolve().parent != root:
-            raise CatalogError(f"Der Zielordner {folder_name} liegt nicht sicher innerhalb des Serverprofils.")
+        if plan.kind == "datapack":
+            folder_name, target_dir = _datapack_target(profile)
+        else:
+            folder_name = "mods" if plan.kind == "mod" else "plugins"
+            target_dir = root / folder_name
+            if target_dir.is_symlink():
+                raise CatalogError(f"Der Zielordner {folder_name} darf kein symbolischer Link sein.")
+            target_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+            if target_dir.resolve().parent != root:
+                raise CatalogError(f"Der Zielordner {folder_name} liegt nicht sicher innerhalb des Serverprofils.")
+        relative_path = f"{folder_name}/{filename}"
         target = target_dir / filename
         if target.exists() or target.is_symlink():
             raise CatalogError(f"Die Datei existiert bereits und wird nicht überschrieben: {target}")
@@ -529,12 +698,14 @@ class ContentCatalog:
             raise CatalogError(f"Die Katalog-Installationsliste ist beschädigt: {exc}") from exc
         if not isinstance(manifest, dict) or manifest.get("schema_version") != 1 or not isinstance(manifest.get("files"), list):
             raise CatalogError("Die Katalog-Installationsliste hat ein unbekanntes Format.")
-        if any(item.get("path") == f"{folder_name}/{filename}" for item in manifest["files"] if isinstance(item, dict)):
-            raise CatalogError(f"{folder_name}/{filename} ist bereits in der Katalog-Installationsliste eingetragen.")
+        if any(item.get("path") == relative_path for item in manifest["files"] if isinstance(item, dict)):
+            raise CatalogError(f"{relative_path} ist bereits in der Katalog-Installationsliste eingetragen.")
         try:
             download_file(download_url, target, checksum=digest, algorithm=algorithm, timeout=180.0)
             if not zipfile.is_zipfile(target):
                 raise CatalogError("Die heruntergeladene Datei ist kein gültiges JAR/ZIP-Archiv.")
+            if plan.kind == "datapack":
+                _validate_datapack_archive(target)
             record = {
                 "source": plan.source,
                 "kind": plan.kind,
@@ -544,9 +715,11 @@ class ContentCatalog:
                 "project_url": plan.project_url,
                 "file_name": filename,
                 "file_version": plan.file_version,
-                "path": f"{folder_name}/{filename}",
+                "path": relative_path,
                 "minecraft_version": profile.minecraft_version,
-                "loader": profile.loader_family if profile.server_type == "arclight" else profile.server_type,
+                "loader": "datapack" if plan.kind == "datapack" else (
+                    profile.loader_family if profile.server_type == "arclight" else profile.server_type
+                ),
                 "checksum": digest,
                 "algorithm": algorithm,
                 "installed_at": datetime.now(timezone.utc).isoformat(),

@@ -36,6 +36,14 @@ def _write_zip(url, destination, **kwargs):
     return target
 
 
+def _write_datapack_zip(url, destination, **kwargs):
+    target = Path(destination)
+    with zipfile.ZipFile(target, "w") as archive:
+        archive.writestr("pack.mcmeta", json.dumps({"pack": {"pack_format": 48, "description": "Test pack"}}))
+        archive.writestr("data/example/function/test.mcfunction", "say hello\n")
+    return target
+
+
 class ContentCatalogTests(unittest.TestCase):
     def test_modrinth_search_is_scoped_to_type_version_and_loader(self):
         response = {
@@ -71,6 +79,63 @@ class ContentCatalogTests(unittest.TestCase):
         params = parse_qs(urlparse(url).query)
         self.assertEqual(json.loads(params["facets"][0]), [["all_project_types:mod"], ["versions:1.21.1"], ["categories:fabric"]])
         self.assertEqual(request.call_args.args[1], "api.modrinth.com")
+
+    def test_modrinth_datapack_search_and_install_use_world_directory_and_zip_metadata(self):
+        search_response = {
+            "hits": [
+                {
+                    "project_id": "dp123",
+                    "slug": "example-pack",
+                    "title": "Example Pack",
+                    "description": "A world datapack",
+                    "downloads": 42,
+                    "project_type": "datapack",
+                    "all_project_types": ["datapack"],
+                }
+            ]
+        }
+        project = {"id": "dp123", "slug": "example-pack", "title": "Example Pack", "project_type": "datapack"}
+        checksum = "e" * 128
+        versions = [
+            {
+                "id": "pack-release",
+                "version_number": "1.0.0",
+                "version_type": "release",
+                "status": "listed",
+                "loaders": ["datapack"],
+                "game_versions": ["1.21.1"],
+                "files": [
+                    {
+                        "filename": "example-pack.zip",
+                        "primary": True,
+                        "url": "https://cdn.modrinth.com/data/dp123/example-pack.zip",
+                        "hashes": {"sha512": checksum},
+                    }
+                ],
+            }
+        ]
+        with tempfile.TemporaryDirectory() as temp:
+            profile = _profile(Path(temp))
+            (Path(profile.server_dir) / "server.properties").write_text("level-name=adventure_world\n", encoding="utf-8")
+            catalog = ContentCatalog()
+            with patch("minecraft_server_creator.catalog._request_json", return_value=search_response) as request:
+                projects = catalog.search("modrinth", "datapack", "example", profile)
+            self.assertEqual(projects[0].kind, "datapack")
+            self.assertEqual(projects[0].url, "https://modrinth.com/datapack/example-pack")
+            facets = json.loads(parse_qs(urlparse(request.call_args.args[0]).query)["facets"][0])
+            self.assertEqual(facets, [["all_project_types:datapack"], ["versions:1.21.1"], ["categories:datapack"]])
+
+            with patch("minecraft_server_creator.catalog._request_json", side_effect=[project, versions]):
+                plan = catalog.prepare_install("modrinth", "datapack", "dp123", profile)
+            self.assertEqual(plan.file_name, "example-pack.zip")
+            self.assertEqual(catalog.destination(profile, "datapack"), "adventure_world/datapacks")
+            with patch("minecraft_server_creator.catalog.download_file", side_effect=_write_datapack_zip):
+                installed = catalog.install(plan, profile)
+            self.assertEqual(
+                installed,
+                Path(profile.server_dir).resolve() / "adventure_world" / "datapacks" / "example-pack.zip",
+            )
+            self.assertEqual(catalog.installed(profile)[0]["path"], "adventure_world/datapacks/example-pack.zip")
 
     def test_modrinth_plugin_search_uses_all_project_types_facet(self):
         response = {
@@ -224,6 +289,73 @@ class ContentCatalogTests(unittest.TestCase):
         self.assertEqual(params["modLoaderType"], ["6"])
         self.assertEqual(request.call_args.kwargs["api_key"], "test-secret")
 
+    def test_curseforge_datapack_category_is_discovered_from_api(self):
+        category_response = {
+            "data": [{"id": 8123, "name": "Data Packs", "slug": "data-packs", "isClass": False, "classId": 9876}]
+        }
+        search_response = {
+            "data": [
+                {
+                    "id": 555,
+                    "name": "Example Pack",
+                    "slug": "example-pack",
+                    "classId": 9876,
+                    "categories": [{"id": 8123, "name": "Data Packs"}],
+                }
+            ]
+        }
+        project_response = {
+            "data": {
+                "id": 555,
+                "name": "Example Pack",
+                "slug": "example-pack",
+                "classId": 9876,
+                "categories": [{"id": 8123, "name": "Data Packs"}],
+            }
+        }
+        files_response = {
+            "data": [
+                {
+                    "id": 501,
+                    "fileName": "example-pack.zip",
+                    "displayName": "Example release",
+                    "fileDate": "2026-09-10T00:00:00Z",
+                    "releaseType": 1,
+                    "isAvailable": True,
+                    "gameVersions": ["1.21.1"],
+                    "downloadUrl": "https://edge.forgecdn.net/files/50/1/example-pack.zip",
+                    "hashes": [{"algo": 1, "value": "f" * 40}],
+                }
+            ]
+        }
+        with tempfile.TemporaryDirectory() as temp:
+            profile = _profile(Path(temp))
+            catalog = ContentCatalog(curseforge_api_key="secret")
+            with patch(
+                "minecraft_server_creator.catalog._request_json",
+                side_effect=[category_response, search_response],
+            ) as request:
+                projects = catalog.search("curseforge", "datapack", "example", profile)
+            self.assertEqual(projects[0].url, "https://www.curseforge.com/minecraft/data-packs/example-pack")
+            params = parse_qs(urlparse(request.call_args.args[0]).query)
+            self.assertEqual(params["classId"], ["9876"])
+            self.assertEqual(params["categoryId"], ["8123"])
+            self.assertNotIn("modLoaderType", params)
+
+            with patch(
+                "minecraft_server_creator.catalog._request_json",
+                side_effect=[category_response, project_response, files_response],
+            ) as request:
+                plan = catalog.prepare_install("curseforge", "datapack", "555", profile)
+            self.assertEqual(plan.file_name, "example-pack.zip")
+            self.assertEqual(plan.project_url, "https://www.curseforge.com/minecraft/data-packs/example-pack")
+            with patch("minecraft_server_creator.catalog.download_file", side_effect=_write_datapack_zip):
+                installed = catalog.install(plan, profile)
+            self.assertEqual(installed, Path(profile.server_dir).resolve() / "world" / "datapacks" / "example-pack.zip")
+            self.assertEqual(request.call_count, 3)
+            self.assertIn("/categories?", request.call_args_list[0].args[0])
+            self.assertIn("/mods/555/files?", request.call_args_list[2].args[0])
+
     def test_curseforge_install_chooses_latest_stable_file_and_sha1(self):
         project = {"data": {"id": 222, "name": "Example", "slug": "example", "classId": 6}}
         files = {
@@ -276,8 +408,35 @@ class ContentCatalogTests(unittest.TestCase):
         self.assertEqual(plan.required_dependencies, ("999",))
         self.assertEqual(request.call_count, 2)
 
+    def test_datapack_rejects_unsafe_world_name_before_download(self):
+        plan = InstallPlan(
+            "modrinth", "datapack", "id", "slug", "Pack", "https://modrinth.com/datapack/slug",
+            "pack.zip", "1.0", "https://cdn.modrinth.com/pack.zip", "a" * 128, "sha512", (), "1.21.1"
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            profile = _profile(Path(temp))
+            (Path(profile.server_dir) / "server.properties").write_text("level-name=../outside\n", encoding="utf-8")
+            with patch("minecraft_server_creator.catalog.download_file") as download:
+                with self.assertRaisesRegex(CatalogError, "sicherer einzelner Weltordnername"):
+                    ContentCatalog().install(plan, profile)
+            download.assert_not_called()
+            self.assertFalse((Path(temp) / "outside" / "datapacks").exists())
+
+    def test_datapack_without_root_pack_metadata_is_removed(self):
+        plan = InstallPlan(
+            "modrinth", "datapack", "id", "slug", "Pack", "https://modrinth.com/datapack/slug",
+            "pack.zip", "1.0", "https://cdn.modrinth.com/pack.zip", "a" * 128, "sha512", (), "1.21.1"
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            profile = _profile(Path(temp))
+            with patch("minecraft_server_creator.catalog.download_file", side_effect=_write_zip):
+                with self.assertRaisesRegex(CatalogError, "pack.mcmeta direkt im Stammverzeichnis"):
+                    ContentCatalog().install(plan, profile)
+            self.assertFalse((Path(profile.server_dir) / "world" / "datapacks" / "pack.zip").exists())
+            self.assertEqual(ContentCatalog.installed(profile), [])
+
     def test_unsafe_filename_and_untrusted_download_host_are_rejected(self):
-        with self.assertRaisesRegex(CatalogError, "portable JAR-Dateinamen"):
+        with self.assertRaisesRegex(CatalogError, "sichere, portable Dateinamen"):
             from minecraft_server_creator.catalog import _safe_filename
             _safe_filename("../../outside.jar")
         bad_plan = InstallPlan(
