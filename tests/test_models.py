@@ -20,6 +20,39 @@ class ModelTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             PortSettings(java_tcp=25565, bedrock_udp=24454, voice_udp=24454)
 
+    def test_modded_profile_launch_metadata_round_trip(self):
+        profile = ServerProfile(
+            id="forge1",
+            name="Forge",
+            slug="forge",
+            server_type="forge",
+            minecraft_version="1.21.4",
+            java_major=21,
+            server_dir="/tmp/forge",
+            loader_version="54.1.0",
+            launch_mode="args",
+            launch_target="libraries/net/minecraftforge/forge/1.21.4-54.1.0/unix_args.txt",
+        )
+        restored = ServerProfile.from_dict(profile.to_dict())
+        self.assertEqual(restored.loader_version, "54.1.0")
+        self.assertEqual(restored.launch_mode, "args")
+        self.assertEqual(restored.launch_target, profile.launch_target)
+
+    def test_profile_rejects_unsafe_launch_target(self):
+        with self.assertRaises(ValidationError):
+            ServerProfile(
+                id="forge1",
+                name="Forge",
+                slug="forge",
+                server_type="forge",
+                minecraft_version="1.21.4",
+                java_major=21,
+                server_dir="/tmp/forge",
+                loader_version="54.1.0",
+                launch_mode="args",
+                launch_target="../outside/unix_args.txt",
+            )
+
     def test_profile_round_trip(self):
         profile = ServerProfile(
             id="abc123",

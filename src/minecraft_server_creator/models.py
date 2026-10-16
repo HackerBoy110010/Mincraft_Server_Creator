@@ -7,7 +7,7 @@ import unicodedata
 from typing import Any
 
 SERVER_TYPES = ("vanilla", "fabric", "forge", "neoforge", "arclight")
-IMPLEMENTED_SERVER_TYPES = frozenset({"vanilla", "fabric"})
+IMPLEMENTED_SERVER_TYPES = frozenset({"vanilla", "fabric", "forge", "neoforge"})
 
 
 class ValidationError(ValueError):
@@ -79,6 +79,9 @@ class ServerProfile:
     auto_start_on_boot: bool = False
     eula_accepted: bool = False
     created_at: str = ""
+    loader_version: str | None = None
+    launch_mode: str = "jar"
+    launch_target: str = "server.jar"
 
     def __post_init__(self) -> None:
         if not self.name.strip():
@@ -91,6 +94,27 @@ class ServerProfile:
             raise ValidationError("Die benötigte Java-Version ist ungültig.")
         if self.memory_mb < 1024:
             raise ValidationError("Mindestens 1024 MB RAM müssen zugewiesen werden.")
+        if self.loader_version is not None and not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._+-]{0,63}", self.loader_version
+        ):
+            raise ValidationError("Die Loader-Version enthält ungültige Zeichen.")
+        if self.launch_mode not in {"jar", "args"}:
+            raise ValidationError("Das Server-Startverfahren ist ungültig.")
+        target = self.launch_target.replace("\\", "/")
+        if (
+            not target
+            or target.startswith("/")
+            or any(part in {"", ".", ".."} for part in target.split("/"))
+            or "\n" in target
+            or "\r" in target
+        ):
+            raise ValidationError("Das Startziel muss ein sicherer relativer Pfad sein.")
+        if self.launch_mode == "jar" and target != "server.jar":
+            raise ValidationError("JAR-Profile müssen server.jar als Startziel verwenden.")
+        if self.launch_mode == "args" and self.server_type not in {"forge", "neoforge"}:
+            raise ValidationError("Startdateien sind nur für unterstützte Forge-/NeoForge-Profile zulässig.")
+        if self.launch_mode == "args" and not self.loader_version:
+            raise ValidationError("Für args-basierte Starts muss eine Loader-Version gespeichert sein.")
         if not self.created_at:
             self.created_at = datetime.now(timezone.utc).isoformat()
 
@@ -105,6 +129,9 @@ class ServerProfile:
             java_major=int(data["java_major"]),
             server_dir=str(data["server_dir"]),
             memory_mb=int(data.get("memory_mb", 4096)),
+            loader_version=(str(data["loader_version"]) if data.get("loader_version") is not None else None),
+            launch_mode=str(data.get("launch_mode", "jar")),
+            launch_target=str(data.get("launch_target", "server.jar")),
             ports=PortSettings.from_dict(data.get("ports")),
             auto_start_on_boot=bool(data.get("auto_start_on_boot", False)),
             eula_accepted=bool(data.get("eula_accepted", False)),
@@ -121,6 +148,9 @@ class ServerProfile:
             "java_major": self.java_major,
             "server_dir": self.server_dir,
             "memory_mb": self.memory_mb,
+            "loader_version": self.loader_version,
+            "launch_mode": self.launch_mode,
+            "launch_target": self.launch_target,
             "ports": self.ports.to_dict(),
             "auto_start_on_boot": self.auto_start_on_boot,
             "eula_accepted": self.eula_accepted,

@@ -10,6 +10,8 @@ class CliParserTests(unittest.TestCase):
         self.assertEqual(args.command, "create")
         self.assertEqual(args.name, "my world")
         self.assertEqual(args.java_port, 25570)
+        forge = parser.parse_args(["create", "modded", "--type", "forge"])
+        self.assertEqual(forge.type, "forge")
 
     def test_optional_port_can_be_disabled_explicitly(self):
         parser = build_parser()

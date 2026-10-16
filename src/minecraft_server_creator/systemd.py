@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 
+from .launch import LaunchConfigurationError, build_java_command
 from .models import ServerProfile
 
 
@@ -54,18 +55,10 @@ class SystemdUserService:
         if not self.supported():
             raise SystemdError("Der Hintergrunddienst benötigt Linux mit systemd.")
         server_dir = Path(profile.server_dir).resolve()
-        jar = server_dir / "server.jar"
-        if not jar.is_file():
-            raise SystemdError(f"Serverdatei fehlt: {jar}")
-        xms = min(1024, max(512, profile.memory_mb // 2))
-        command = [
-            java_path,
-            f"-Xms{xms}M",
-            f"-Xmx{profile.memory_mb}M",
-            "-jar",
-            jar,
-            "nogui",
-        ]
+        try:
+            command = build_java_command(profile, java_path)
+        except LaunchConfigurationError as exc:
+            raise SystemdError(str(exc)) from exc
         exec_start = " ".join(_quote_systemd(part) for part in command)
         safe_name = profile.name.replace("\n", " ").replace("\r", " ")
         content = "\n".join(

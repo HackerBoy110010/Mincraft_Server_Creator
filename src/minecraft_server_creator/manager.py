@@ -13,7 +13,8 @@ from typing import Callable
 
 from .config import AppConfig, ConfigStore, data_directory
 from .minecraft import MinecraftMetadataClient
-from .loaders import FabricInstaller
+from .launch import LaunchConfigurationError, validate_profile_launch
+from .loaders import FabricInstaller, ForgeInstaller, LoaderInstallResult, NeoForgeInstaller
 from .models import IMPLEMENTED_SERVER_TYPES, PortSettings, ServerProfile, slugify, validate_port
 from .network import port_available
 from .properties import read_properties, update_properties
@@ -42,12 +43,16 @@ class ServerManager:
         runtimes: RuntimeManager | None = None,
         services: SystemdUserService | None = None,
         fabric: FabricInstaller | None = None,
+        forge: ForgeInstaller | None = None,
+        neoforge: NeoForgeInstaller | None = None,
     ) -> None:
         self.store = store or ConfigStore()
         self.metadata = metadata or MinecraftMetadataClient()
         self.runtimes = runtimes or RuntimeManager(data_directory())
         self.services = services or SystemdUserService()
         self.fabric = fabric or FabricInstaller()
+        self.forge = forge or ForgeInstaller()
+        self.neoforge = neoforge or NeoForgeInstaller()
 
     def load(self) -> AppConfig:
         return self.store.load()
@@ -78,7 +83,7 @@ class ServerManager:
         if server_type not in IMPLEMENTED_SERVER_TYPES:
             raise ManagerError(
                 f"{server_type} ist bereits in der Planung, aber noch nicht implementiert. "
-                "Aktuell sind Vanilla und Fabric verfügbar."
+                "Aktuell sind Vanilla, Fabric, Forge und NeoForge verfügbar."
             )
         if not name.strip():
             raise ManagerError("Der Servername darf nicht leer sein.")
@@ -105,10 +110,17 @@ class ServerManager:
         try:
             for child in ("logs", "mods", "plugins", "backups", "config"):
                 (temp_dir / child).mkdir(mode=0o700, parents=True, exist_ok=True)
+            loader_install: LoaderInstallResult | None = None
             if server_type == "vanilla":
                 self.metadata.install_vanilla(minecraft_version, temp_dir)
             elif server_type == "fabric":
-                self.fabric.install(minecraft_version, version_info, temp_dir)
+                loader_install = self.fabric.install(minecraft_version, version_info, temp_dir)
+            elif server_type in {"forge", "neoforge"}:
+                # Forge-family installers execute Java during profile creation, so the required
+                # managed runtime is prepared now rather than waiting until the first server start.
+                installer_java = self.runtimes.ensure(int(java_major))
+                installer = self.forge if server_type == "forge" else self.neoforge
+                loader_install = installer.install(minecraft_version, version_info, temp_dir, installer_java)
             (temp_dir / "eula.txt").write_text("eula=false\n", encoding="utf-8")
             update_properties(
                 temp_dir / "server.properties",
@@ -123,7 +135,6 @@ class ServerManager:
                 },
             )
             final_dir.parent.mkdir(parents=True, exist_ok=True)
-            temp_dir.rename(final_dir)
             profile = ServerProfile(
                 id=profile_id,
                 name=name.strip(),
@@ -131,11 +142,20 @@ class ServerManager:
                 server_type=server_type,
                 minecraft_version=minecraft_version,
                 java_major=int(java_major),
-                server_dir=str(final_dir),
+                server_dir=str(temp_dir),
                 memory_mb=memory_mb,
+                loader_version=loader_install.loader_version if loader_install else None,
+                launch_mode=loader_install.launch_mode if loader_install else "jar",
+                launch_target=loader_install.launch_target if loader_install else "server.jar",
                 ports=ports,
                 auto_start_on_boot=auto_start_on_boot,
             )
+            try:
+                validate_profile_launch(profile)
+            except LaunchConfigurationError as exc:
+                raise ManagerError(f"Der Loader hat keine gültige Server-Startkonfiguration erstellt: {exc}") from exc
+            temp_dir.rename(final_dir)
+            profile.server_dir = str(final_dir)
             config.profiles.append(profile)
             try:
                 self.save(config)
@@ -189,9 +209,10 @@ class ServerManager:
         profile = self.get_profile(selector)
         if profile.server_type not in IMPLEMENTED_SERVER_TYPES:
             raise ManagerError(f"Servertyp '{profile.server_type}' wird noch nicht unterstützt.")
-        server_dir = Path(profile.server_dir)
-        if not (server_dir / "server.jar").is_file():
-            raise ManagerError("server.jar fehlt. Das Profil muss erneut installiert werden.")
+        try:
+            validate_profile_launch(profile)
+        except LaunchConfigurationError as exc:
+            raise ManagerError(f"Serverinstallation ist unvollständig: {exc}") from exc
         if not profile.eula_accepted:
             raise ManagerError("Die Minecraft-EULA ist noch nicht bestätigt. Starte erneut und bestätige sie zuerst.")
         if not self.services.supported():

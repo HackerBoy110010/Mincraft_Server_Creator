@@ -113,7 +113,9 @@ def _create(manager: ServerManager, args: argparse.Namespace) -> None:
         server_type = input("Servertyp [vanilla]: ").strip().lower() or "vanilla"
     server_type = server_type or "vanilla"
     if server_type not in IMPLEMENTED_SERVER_TYPES:
-        raise ManagerError(f"{server_type} ist noch nicht verfügbar; momentan können Vanilla und Fabric installiert werden.")
+        raise ManagerError(
+            f"{server_type} ist noch nicht verfügbar; momentan können Vanilla, Fabric, Forge und NeoForge installiert werden."
+        )
     version = args.version
     if version is None:
         if interactive:
@@ -138,7 +140,10 @@ def _create(manager: ServerManager, args: argparse.Namespace) -> None:
         if interactive else defaults.voice_udp
     )
     ports = PortSettings(java_tcp=java_port, bedrock_udp=bedrock_port, voice_udp=voice_port)
-    if not _yes_no(f"{server_type.capitalize()}-Server '{name}' wird geladen. Fortfahren?", default=True):
+    download_message = f"{server_type.capitalize()}-Server '{name}' wird geladen."
+    if server_type in {"forge", "neoforge"}:
+        download_message += " Die passende verwaltete Temurin-JRE wird für den Installer bei Bedarf ebenfalls geladen."
+    if not _yes_no(download_message + " Fortfahren?", default=True):
         print("Abgebrochen.")
         return
     profile = manager.create_server(
@@ -151,6 +156,8 @@ def _create(manager: ServerManager, args: argparse.Namespace) -> None:
     )
     print(f"\nServerprofil '{profile.name}' wurde angelegt.")
     print(f"Minecraft: {profile.minecraft_version}; Java {profile.java_major}; Typ: {profile.server_type}")
+    if profile.loader_version:
+        print(f"Loader-Version: {profile.loader_version}")
     print(f"Dateien: {profile.server_dir}")
     print("Vor dem ersten Start musst du der Minecraft-EULA ausdrücklich zustimmen.\n")
 
@@ -199,8 +206,9 @@ def _show_list(manager: ServerManager) -> None:
         auto = "Autostart an" if profile.auto_start_on_boot else "Autostart aus"
         bedrock = str(profile.ports.bedrock_udp) if profile.ports.bedrock_udp else "aus"
         voice = str(profile.ports.voice_udp) if profile.ports.voice_udp else "aus"
+        loader = f" / Loader {profile.loader_version}" if profile.loader_version else ""
         print(
-            f"- {profile.name} [{profile.slug}] | {profile.server_type} {profile.minecraft_version} | {state} | {auto}\n"
+            f"- {profile.name} [{profile.slug}] | {profile.server_type} {profile.minecraft_version}{loader} | {state} | {auto}\n"
             f"  Java TCP {profile.ports.java_tcp}; Bedrock UDP {bedrock}; Voice UDP {voice}"
         )
     print()
@@ -321,7 +329,7 @@ def _menu(manager: ServerManager, store: ConfigStore) -> None:
         print(
             "\nMinecraft Server Creator\n"
             "  1) Server anzeigen\n"
-            "  2) Server anlegen (Vanilla/Fabric)\n"
+            "  2) Server anlegen (Vanilla/Fabric/Forge/NeoForge)\n"
             "  3) Server starten\n"
             "  4) Server stoppen\n"
             "  5) Geführte Servereinstellungen ändern\n"
@@ -394,7 +402,7 @@ def build_parser() -> argparse.ArgumentParser:
     configure.add_argument("server", help="Servername oder Profil-Slug")
     create = sub.add_parser("create", help="Minecraft-Serverprofil anlegen")
     create.add_argument("name", nargs="?", help="Anzeigename des Servers")
-    create.add_argument("--type", choices=SERVER_TYPES, default=None, help="Servertyp (derzeit Vanilla und Fabric verfügbar)")
+    create.add_argument("--type", choices=SERVER_TYPES, default=None, help="Servertyp (Vanilla, Fabric, Forge oder NeoForge verfügbar)")
     create.add_argument("--version", default=None, help="Minecraft-Version oder 'latest'")
     create.add_argument("--memory-mb", type=int, default=None, help="Maximaler Arbeitsspeicher in MB")
     create.add_argument("--java-port", type=int, default=None, help="Java-Port/TCP")

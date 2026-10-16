@@ -1,10 +1,39 @@
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import call, patch
 
-from minecraft_server_creator.loaders import FABRIC_META_URL, FabricInstaller, LoaderInstallError
+from minecraft_server_creator.loaders import (
+    FABRIC_META_URL,
+    FORGE_MAVEN_BASE,
+    FORGE_PROMOTIONS_URL,
+    NEOFORGE_MAVEN_BASE,
+    NEOFORGE_METADATA_URL,
+    FabricInstaller,
+    ForgeInstaller,
+    LoaderInstallError,
+    LoaderInstallResult,
+    NeoForgeInstaller,
+)
+
+
+def _write_fake_download(_url, destination, **_kwargs):
+    target = Path(destination)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"fake installer")
+    return target
+
+
+def _fake_installer_process(target: str):
+    def run(args, *, cwd, **_kwargs):
+        launch_file = Path(cwd) / target
+        launch_file.parent.mkdir(parents=True, exist_ok=True)
+        launch_file.write_text("-cp fake Main", encoding="utf-8")
+        return subprocess.CompletedProcess(args, 0, stdout="installed", stderr="")
+
+    return run
 
 
 class FabricInstallerTests(unittest.TestCase):
@@ -26,7 +55,7 @@ class FabricInstallerTests(unittest.TestCase):
                     result = FabricInstaller().install(
                         "1.21.4", {"id": "1.21.4", "javaVersion": {"majorVersion": 21}}, server_dir
                     )
-            self.assertEqual(result, server_dir / "server.jar")
+            self.assertEqual(result, LoaderInstallResult("0.18.1", "jar", "server.jar"))
             self.assertEqual(
                 fetch.call_args_list,
                 [
@@ -65,6 +94,135 @@ class FabricInstallerTests(unittest.TestCase):
 
             with self.assertRaisesRegex(LoaderInstallError, "meta.fabricmc.net"):
                 _fetch_json("https://example.com/fabric.json")
+            open_url.assert_not_called()
+
+
+class ForgeInstallerTests(unittest.TestCase):
+    def test_downloads_latest_stable_official_installer_and_builds_argument_launcher(self):
+        minecraft_version = "1.21.4"
+        loader_version = "54.1.0"
+        coordinate = f"{minecraft_version}-{loader_version}"
+        artifact = f"forge-{coordinate}-installer.jar"
+        installer_url = f"{FORGE_MAVEN_BASE}/{coordinate}/{artifact}"
+        launch_target = f"libraries/net/minecraftforge/forge/{coordinate}/unix_args.txt"
+        promotions = {"promos": {f"{minecraft_version}-latest": loader_version}}
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            with patch("minecraft_server_creator.loaders._fetch_official_json", return_value=promotions) as fetch_json:
+                with patch("minecraft_server_creator.loaders._fetch_official_text", return_value="a" * 40) as fetch_text:
+                    with patch("minecraft_server_creator.loaders.download_file", side_effect=_write_fake_download) as download:
+                        with patch(
+                            "minecraft_server_creator.loaders.subprocess.run",
+                            side_effect=_fake_installer_process(launch_target),
+                        ) as run_installer:
+                            result = ForgeInstaller().install(
+                                minecraft_version,
+                                {"id": minecraft_version},
+                                root,
+                                "/managed/java",
+                            )
+            self.assertEqual(result, LoaderInstallResult(loader_version, "args", launch_target))
+            fetch_json.assert_called_once_with(FORGE_PROMOTIONS_URL, "files.minecraftforge.net")
+            fetch_text.assert_called_once_with(f"{installer_url}.sha1", "maven.minecraftforge.net")
+            download.assert_called_once_with(
+                installer_url,
+                root / f".{artifact}",
+                checksum="a" * 40,
+                algorithm="sha1",
+                timeout=180.0,
+            )
+            self.assertEqual(run_installer.call_args.args[0], ["/managed/java", "-jar", str(root / f".{artifact}"), "--installServer"])
+            self.assertFalse((root / f".{artifact}").exists())
+            metadata = json.loads((root / "forge-loader.json").read_text())
+            self.assertEqual(metadata["loader_version"], loader_version)
+            self.assertEqual(metadata["launch_target"], launch_target)
+
+    def test_falls_back_to_recommended_stable_build(self):
+        with tempfile.TemporaryDirectory() as temp:
+            promotions = {"promos": {"1.20.1-latest": "not-stable", "1.20.1-recommended": "47.4.0"}}
+            launch_target = "libraries/net/minecraftforge/forge/1.20.1-47.4.0/unix_args.txt"
+            with patch("minecraft_server_creator.loaders._fetch_official_json", return_value=promotions):
+                with patch("minecraft_server_creator.loaders._fetch_official_text", return_value="b" * 40):
+                    with patch("minecraft_server_creator.loaders.download_file", side_effect=_write_fake_download):
+                        with patch(
+                            "minecraft_server_creator.loaders.subprocess.run",
+                            side_effect=_fake_installer_process(launch_target),
+                        ):
+                            result = ForgeInstaller().install("1.20.1", {"id": "1.20.1"}, temp, "/java")
+            self.assertEqual(result.loader_version, "47.4.0")
+
+    def test_rejects_missing_stable_forge_build(self):
+        with patch(
+            "minecraft_server_creator.loaders._fetch_official_json",
+            return_value={"promos": {"1.21.1-latest": "beta-1", "1.21.1-recommended": ""}},
+        ):
+            with self.assertRaisesRegex(LoaderInstallError, "keinen stabilen Installer"):
+                ForgeInstaller().install("1.21.1", {"id": "1.21.1"}, tempfile.gettempdir(), "/java")
+
+    def test_rejects_forge_snapshots(self):
+        with self.assertRaisesRegex(LoaderInstallError, "numerische Minecraft-Versionen"):
+            ForgeInstaller().install("1.21.1-pre1", {"id": "1.21.1-pre1"}, tempfile.gettempdir(), "/java")
+
+
+class NeoForgeInstallerTests(unittest.TestCase):
+    def test_game_version_prefixes(self):
+        self.assertEqual(NeoForgeInstaller.minecraft_prefix("1.21.4"), "21.4.")
+        self.assertEqual(NeoForgeInstaller.minecraft_prefix("1.21"), "21.0.")
+        self.assertEqual(NeoForgeInstaller.minecraft_prefix("26.1"), "26.1.")
+
+    def test_selects_latest_stable_compatible_maven_version(self):
+        metadata = """<metadata><versioning><versions>
+          <version>21.1.9</version><version>21.1.12</version><version>21.1.100</version>
+          <version>21.1.101-beta</version><version>21.2.1</version><version>20.4.8</version>
+        </versions></versioning></metadata>"""
+        loader_version = "21.1.100"
+        artifact = f"neoforge-{loader_version}-installer.jar"
+        installer_url = f"{NEOFORGE_MAVEN_BASE}/{loader_version}/{artifact}"
+        launch_target = f"libraries/net/neoforged/neoforge/{loader_version}/unix_args.txt"
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            with patch(
+                "minecraft_server_creator.loaders._fetch_official_text",
+                side_effect=[metadata, "c" * 40],
+            ) as fetch_text:
+                with patch("minecraft_server_creator.loaders.download_file", side_effect=_write_fake_download) as download:
+                    with patch(
+                        "minecraft_server_creator.loaders.subprocess.run",
+                        side_effect=_fake_installer_process(launch_target),
+                    ) as run_installer:
+                        result = NeoForgeInstaller().install("1.21.1", {"id": "1.21.1"}, root, "/managed/java")
+            self.assertEqual(result, LoaderInstallResult(loader_version, "args", launch_target))
+            self.assertEqual(
+                fetch_text.call_args_list,
+                [
+                    call(NEOFORGE_METADATA_URL, "maven.neoforged.net", accept="application/xml"),
+                    call(f"{installer_url}.sha1", "maven.neoforged.net"),
+                ],
+            )
+            download.assert_called_once_with(
+                installer_url,
+                root / f".{artifact}",
+                checksum="c" * 40,
+                algorithm="sha1",
+                timeout=180.0,
+            )
+            self.assertEqual(run_installer.call_args.args[0][0:2], ["/managed/java", "-jar"])
+            self.assertTrue((root / launch_target).is_file())
+            saved = json.loads((root / "neoforge-loader.json").read_text())
+            self.assertEqual(saved["loader_version"], loader_version)
+
+    def test_rejects_missing_stable_compatible_build(self):
+        metadata = "<metadata><versioning><versions><version>21.2.1</version><version>21.1.2-beta</version></versions></versioning></metadata>"
+        with patch("minecraft_server_creator.loaders._fetch_official_text", return_value=metadata):
+            with self.assertRaisesRegex(LoaderInstallError, "keinen stabilen Installer"):
+                NeoForgeInstaller().install("1.21.1", {"id": "1.21.1"}, tempfile.gettempdir(), "/java")
+
+    def test_rejects_untrusted_metadata_hosts(self):
+        with patch("minecraft_server_creator.loaders.urlopen") as open_url:
+            from minecraft_server_creator.loaders import _fetch_official_text
+
+            with self.assertRaisesRegex(LoaderInstallError, "maven.neoforged.net"):
+                _fetch_official_text("https://evil.example/metadata.xml", "maven.neoforged.net")
             open_url.assert_not_called()
 
 

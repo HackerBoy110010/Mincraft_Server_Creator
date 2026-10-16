@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from minecraft_server_creator.config import ConfigStore
 from minecraft_server_creator.manager import ManagerError, ServerManager
+from minecraft_server_creator.loaders import LoaderInstallResult
 from minecraft_server_creator.models import PortSettings
 from minecraft_server_creator.properties import read_properties, update_properties
 
@@ -28,7 +29,36 @@ class FakeFabric:
     def install(self, version, version_info, server_dir):
         target = Path(server_dir) / "server.jar"
         target.write_bytes(b"fake Fabric server jar")
-        return target
+        return LoaderInstallResult("0.18.1", "jar", "server.jar")
+
+
+class FakeRuntime:
+    def __init__(self):
+        self.features = []
+
+    def ensure(self, feature):
+        self.features.append(feature)
+        return Path("/managed/java")
+
+
+class FakeForge:
+    def install(self, version, version_info, server_dir, java_path):
+        loader_version = "54.1.0"
+        target = f"libraries/net/minecraftforge/forge/{version}-{loader_version}/unix_args.txt"
+        launch_file = Path(server_dir) / target
+        launch_file.parent.mkdir(parents=True, exist_ok=True)
+        launch_file.write_text("-cp fake Main", encoding="utf-8")
+        return LoaderInstallResult(loader_version, "args", target)
+
+
+class FakeNeoForge:
+    def install(self, version, version_info, server_dir, java_path):
+        loader_version = "21.1.100"
+        target = f"libraries/net/neoforged/neoforge/{loader_version}/unix_args.txt"
+        launch_file = Path(server_dir) / target
+        launch_file.parent.mkdir(parents=True, exist_ok=True)
+        launch_file.write_text("-cp fake Main", encoding="utf-8")
+        return LoaderInstallResult(loader_version, "args", target)
 
 
 class FakeServices:
@@ -78,6 +108,41 @@ class ManagerTests(unittest.TestCase):
             self.assertEqual(profile.server_type, "fabric")
             self.assertEqual((Path(profile.server_dir) / "server.jar").read_bytes(), b"fake Fabric server jar")
 
+    def test_create_forge_profile_installs_with_managed_java_and_persists_launch_args(self):
+        with tempfile.TemporaryDirectory() as temp:
+            runtime = FakeRuntime()
+            manager = ServerManager(
+                store=ConfigStore(Path(temp) / "config.json"),
+                metadata=FakeMetadata(),
+                runtimes=runtime,
+                forge=FakeForge(),
+            )
+            manager.setup(Path(temp) / "servers", PortSettings())
+            profile = manager.create_server("Forge world", server_type="forge")
+            expected = "libraries/net/minecraftforge/forge/1.21.4-54.1.0/unix_args.txt"
+            self.assertEqual(runtime.features, [21])
+            self.assertEqual(profile.launch_mode, "args")
+            self.assertEqual(profile.launch_target, expected)
+            self.assertEqual(profile.loader_version, "54.1.0")
+            self.assertTrue((Path(profile.server_dir) / expected).is_file())
+            restored = manager.get_profile(profile.slug)
+            self.assertEqual(restored.launch_target, expected)
+
+    def test_create_neoforge_profile_persists_its_launcher(self):
+        with tempfile.TemporaryDirectory() as temp:
+            manager = ServerManager(
+                store=ConfigStore(Path(temp) / "config.json"),
+                metadata=FakeMetadata(),
+                runtimes=FakeRuntime(),
+                neoforge=FakeNeoForge(),
+            )
+            manager.setup(Path(temp) / "servers", PortSettings())
+            profile = manager.create_server("NeoForge world", server_type="neoforge")
+            expected = "libraries/net/neoforged/neoforge/21.1.100/unix_args.txt"
+            self.assertEqual(profile.launch_target, expected)
+            self.assertEqual(profile.loader_version, "21.1.100")
+            self.assertTrue((Path(profile.server_dir) / expected).is_file())
+
     def test_guided_settings_validate_and_update_properties(self):
         with tempfile.TemporaryDirectory() as temp:
             manager = ServerManager(store=ConfigStore(Path(temp) / "config.json"), metadata=FakeMetadata())
@@ -100,7 +165,7 @@ class ManagerTests(unittest.TestCase):
             manager = ServerManager(store=ConfigStore(Path(temp) / "config.json"), metadata=FakeMetadata())
             manager.setup(Path(temp) / "servers", PortSettings())
             with self.assertRaisesRegex(Exception, "noch nicht implementiert"):
-                manager.create_server("Forge world", server_type="forge")
+                manager.create_server("Arclight world", server_type="arclight")
             self.assertEqual(manager.load().profiles, [])
 
     def test_rcon_is_local_only_and_secret_is_private(self):
