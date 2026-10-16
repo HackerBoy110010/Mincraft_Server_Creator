@@ -18,9 +18,10 @@ SSH-freundlicher Minecraft-Server-Manager mit einfachem Python-Textmenü. Das Re
 - manuelle Backups gestoppter Serverprofile
 - lokales RCON nur über `127.0.0.1`, mit Passwortdatei und restriktiven Rechten
 - Online-Spielerliste und Live-Spielerdaten; Inventar lesen sowie einzelne Plätze bei Vanilla 1.17+ ändern
+- Mod-/Plugin-Suche und Installation aus Modrinth und CurseForge mit Versions-/Loaderfiltern, Prüfsummen und getrennten `mods/`-/`plugins/`-Ordnern
 - Python-Quellinstallation und interaktives Terminalmenü
 
-**Noch nicht implementiert:** Mod-/Plugin-Downloads, automatische Firewallregeln und Backup-Wiederherstellung. RCON ist nur für Vanilla eingebunden und im echten Minecraft-Serverbetrieb noch nicht live getestet; Inventarzugriff betrifft ausschließlich online befindliche Spieler. Die Vanilla-, Fabric-, Forge-, NeoForge- und Arclight-Installer sind unit-getestet, aber echte Downloads und Serverstarts noch nicht live verifiziert. Forge/NeoForge führen den offiziellen Installer bei der Profilerstellung mit der passend verwalteten Temurin-JRE aus. Arclight verlangt die explizite Basis-Auswahl `fabric`, `forge` oder `neoforge`. Nicht unterstützte oder nicht kompatible Loader-Builds werden abgelehnt.
+**Noch nicht implementiert:** automatische Firewallregeln und Backup-Wiederherstellung. Der CurseForge-Katalog benötigt einen API-Schlüssel in `CURSEFORGE_API_KEY`; er wird nicht in der Serverkonfiguration gespeichert. Katalogabhängigkeiten werden angezeigt, aber nicht automatisch installiert. Plugins können nur für Arclight ausgewählt werden; Modrinth-Ergebnisse werden auf Bukkit-/Spigot-Dateien gefiltert. CurseForge kann Paper-only-Dateien nicht sicher herausfiltern. Da Arclight keine Paper-only-Kompatibilität dokumentiert, prüfe vor dem Start die Herstellerangaben. RCON ist nur für Vanilla eingebunden und im echten Minecraft-Serverbetrieb noch nicht live getestet; Inventarzugriff betrifft ausschließlich online befindliche Spieler. Die Vanilla-, Fabric-, Forge-, NeoForge- und Arclight-Installer sowie Katalogfunktionen sind unit-getestet, aber echte Downloads und Serverstarts noch nicht live verifiziert. Forge/NeoForge führen den offiziellen Installer bei der Profilerstellung mit der passend verwalteten Temurin-JRE aus. Arclight verlangt die explizite Basis-Auswahl `fabric`, `forge` oder `neoforge`. Nicht unterstützte oder nicht kompatible Loader-Builds werden abgelehnt.
 
 ## Voraussetzungen
 
@@ -52,7 +53,7 @@ Für die Quellinstallation unter Windows wird die virtuelle Umgebung über `.ven
 - Bedrock/Geyser: UDP (Standard 19132, optional)
 - Simple Voice Chat: UDP (Standard 24454, optional)
 
-Beim Anlegen eines Servers kann man die Werte übernehmen oder pro Serverprofil ändern. Das Setzen dieser Ports öffnet weder die Betriebssystem-Firewall noch den Heimrouter. Routerweiterleitung und lokale Firewallregeln bleiben manuell. In der aktuellen Vanilla-Ausbaustufe werden Bedrock- und Voicechat-Ports gespeichert, aber erst mit den passenden Mods/Plugins tatsächlich verwendet.
+Beim Anlegen eines Servers kann man die Werte übernehmen oder pro Serverprofil ändern. Das Setzen dieser Ports öffnet weder die Betriebssystem-Firewall noch den Heimrouter. Routerweiterleitung und lokale Firewallregeln bleiben manuell. Bedrock- und Voicechat-Ports werden gespeichert; Geyser bzw. Simple Voice Chat müssen zusätzlich als passende Mod/Plugin installiert und konfiguriert werden.
 
 `mcsc configure <server>` führt durch die üblichen Spieleinstellungen. Der Server muss dafür gestoppt sein; Änderungen werden beim nächsten Start übernommen.
 
@@ -76,6 +77,10 @@ mcsc rcon inventory zuhause Steve
 # Beispiel: --yes bestätigt explizit; ändert nur einen ONLINE-Spieler
 mcsc rcon set-item zuhause Steve 0 minecraft:diamond 1 --yes
 mcsc stop zuhause
+# Mods/Plugins nur bei gestopptem Server; install fragt vor dem Download nach Bestätigung:
+mcsc catalog search zuhause minimap --source modrinth --kind mod
+mcsc catalog install zuhause PROJEKT_ID --source modrinth --kind mod
+mcsc catalog list zuhause
 mcsc rcon disable zuhause
 mcsc ip
 ```
@@ -96,6 +101,12 @@ Das Programm zeigt lokale und öffentliche IP sowie konfigurierte TCP-/UDP-Endpu
 
 RCON wird standardmäßig nicht aktiviert. `mcsc rcon enable <server>` muss bei gestopptem Server ausgeführt werden; es bindet RCON ausdrücklich an `127.0.0.1`, wählt den lokalen Standardport 25575 und speichert das erzeugte Passwort unter `config/rcon-password` mit Dateirechten `0600`. Die CLI bietet `players`, `stats`, `inventory` und (ab Vanilla 1.17) `set-item`. Beim `set-item` sind die Plätze 0–8 die Hotbar und 9–35 das Hauptinventar. Die Tools adressieren nur online befindliche Java-Spieler; Offline-Inventare werden nicht gelesen oder verändert. Inventaränderungen sind versions-/servertypgeprüft und schlagen geschlossen fehl, ohne den Serverbetrieb zu sperren. Der RCON-Port darf nicht über Router oder Firewall veröffentlicht werden. Diese Integration wurde mit simuliertem RCON-Verkehr getestet, aber noch nicht an einem echten Minecraft-Server.
 
+## Mods und Plugins
+
+`mcsc catalog search <server> <suchbegriff> --source modrinth|curseforge --kind mod|plugin` sucht für die Minecraft-Version und den passenden Loader des Profils. Mods können auf Fabric, Forge, NeoForge und den entsprechenden Arclight-Basen installiert werden; Plugins nur auf Arclight. `catalog install` wählt standardmäßig die neueste stabile passende JAR-Datei, fragt interaktiv nach Bestätigung (oder verlangt in nichtinteraktiven Aufrufen `--yes`), prüft eine vom Anbieter veröffentlichte SHA-1/SHA-512/MD5-Prüfsumme und überschreibt keine vorhandene Datei. Der Server muss gestoppt sein. Installationsdaten werden in `config/catalog-installed.json` vermerkt; `mcsc catalog list <server>` zeigt sie an.
+
+Modrinth ist ohne Schlüssel nutzbar. CurseForge verlangt einen offiziellen API-Schlüssel als Umgebungsvariable `CURSEFORGE_API_KEY`; der Schlüssel wird ausschließlich im Request-Header verwendet und nicht gespeichert. Die CurseForge-API bietet hier keinen verlässlichen Server-/Client-Filter für Mods, daher sind die Herstellerangaben zu prüfen. Eine Abhängigkeitshinweis-Liste wird ausgegeben; erforderliche Abhängigkeiten installiert das Programm in dieser ersten Katalogversion nicht automatisch. Bei Plugins sind ebenfalls die Herstellerangaben zur Kompatibilität zu prüfen; Paper-only-Dateien werden nicht als Bukkit-/Spigot-kompatibel vorausgesetzt.
+
 ## Tests
 
 ```bash
@@ -106,7 +117,7 @@ python -m unittest discover -s tests -v
 
 1. Vanilla-Grundlage, Profile, Ports, Java-Verwaltung und systemd (Umsetzung begonnen; Live-Serverbetrieb noch nicht verifiziert)
 2. Live-Smoke-Tests für Vanilla, Fabric, Forge, NeoForge und Arclight
-3. geprüfter Mod-/Plugin-Katalog über Modrinth und CurseForge
+3. Mod-/Plugin-Katalog über Modrinth und CurseForge (Adapter unit-getestet; Live-API-/Download-Smoke-Test offen)
 4. RCON-/Inventar-Kompatibilität für weitere Servertypen und Versionen, Backup-Wiederherstellung sowie Live-Serverprüfung
 5. Linux-x64-/ARM64-Release-Pakete und Distributionstests; später Windows/macOS
 

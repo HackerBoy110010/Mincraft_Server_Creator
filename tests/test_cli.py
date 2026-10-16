@@ -16,6 +16,12 @@ class CliParserTests(unittest.TestCase):
             ["create", "hybrid", "--type", "arclight", "--arclight-loader", "neoforge"]
         )
         self.assertEqual(arclight.arclight_loader, "neoforge")
+        catalog_search = parser.parse_args(
+            ["catalog", "search", "home", "minimap", "--source", "modrinth", "--kind", "mod"]
+        )
+        self.assertEqual(catalog_search.catalog_action, "search")
+        self.assertEqual(catalog_search.source, "modrinth")
+        self.assertEqual(catalog_search.kind, "mod")
 
     def test_optional_port_can_be_disabled_explicitly(self):
         parser = build_parser()
@@ -35,6 +41,7 @@ class CliParserTests(unittest.TestCase):
         self.assertIn("create", choices)
         self.assertIn("configure", choices)
         self.assertIn("rcon", choices)
+        self.assertIn("catalog", choices)
         self.assertIn("start", choices)
         self.assertIn("autostart", choices)
 

@@ -5,6 +5,7 @@ from pathlib import Path
 import shlex
 import sys
 
+from .catalog import CatalogError, ContentCatalog
 from .config import AppConfig, ConfigError, ConfigStore
 from .manager import ManagerError, ServerManager
 from .minecraft import MinecraftDownloadError
@@ -337,6 +338,111 @@ def _rcon_menu(manager: ServerManager) -> None:
             print("Bitte eine gültige Menüoption eingeben.")
 
 
+def _install_catalog_project(
+    manager: ServerManager,
+    catalog: ContentCatalog,
+    profile_slug: str,
+    source: str,
+    kind: str,
+    project_id: str,
+    *,
+    assume_yes: bool = False,
+) -> None:
+    profile = manager.get_profile(profile_slug)
+    if manager.services.is_active(profile):
+        raise ManagerError("Stoppe den Server vor der Installation von Mods oder Plugins.")
+    plan = catalog.prepare_install(source, kind, project_id, profile)
+    print(f"{plan.project_title} — {plan.file_version}")
+    print(f"Quelle: {plan.source}; Datei: {plan.file_name}; Ziel: {kind}s/")
+    print(f"Projektseite: {plan.project_url}")
+    if plan.required_dependencies:
+        print(
+            "Warnung: Das Projekt nennt erforderliche Abhängigkeiten, die nicht automatisch installiert werden: "
+            + ", ".join(plan.required_dependencies)
+        )
+    if kind == "plugin":
+        print("Kompatibilitätshinweis: Arclight unterstützt Bukkit/Spigot; Paper-only-Plugins sind nicht abgedeckt. Prüfe die Herstellerangaben.")
+    if kind == "mod" and source == "curseforge":
+        print("Kompatibilitätshinweis: CurseForge liefert keinen verlässlichen Server-/Client-Filter; prüfe die Herstellerangaben.")
+    if not assume_yes:
+        if not sys.stdin.isatty():
+            raise ManagerError("Nichtinteraktive Kataloginstallationen benötigen die ausdrückliche Option --yes.")
+        if not _yes_no("Diese JAR-Datei installieren?", default=False):
+            print("Installation abgebrochen.")
+            return
+    installed = catalog.install(plan, profile)
+    print(f"Installiert: {installed}")
+
+
+def _catalog_command(manager: ServerManager, args: argparse.Namespace) -> None:
+    profile = manager.get_profile(args.server)
+    catalog = ContentCatalog()
+    if args.catalog_action == "list":
+        files = catalog.installed(profile)
+        if not files:
+            print("Es sind keine Kataloginstallationen registriert.")
+            return
+        for item in files:
+            state = "vorhanden" if (Path(profile.server_dir) / str(item.get("path", ""))).is_file() else "fehlt"
+            print(
+                f"- {item.get('project_title', item.get('project_id', '?'))} "
+                f"[{item.get('source', '?')}/{item.get('kind', '?')}] "
+                f"MC {item.get('minecraft_version', '?')} / {item.get('file_version', '?')} "
+                f"— {item.get('path', '?')} ({state})"
+            )
+        return
+    if args.catalog_action == "search":
+        projects = catalog.search(args.source, args.kind, args.query, profile, limit=args.limit)
+        if args.kind == "mod" and args.source == "curseforge":
+            print("Hinweis: CurseForge filtert nicht verlässlich nach Server-/Client-Seite; bitte die Herstellerangaben prüfen.")
+        if not projects:
+            print("Keine passenden Projekte gefunden.")
+            return
+        for project in projects:
+            print(f"{project.project_id}\t{project.title} — {project.summary} [{project.downloads:,} Downloads]")
+            print(f"  {project.url}")
+        print("\nZum Installieren: mcsc catalog install <server> <projekt-id> --source <quelle> --kind <mod|plugin>")
+        return
+    if args.catalog_action == "install":
+        _install_catalog_project(
+            manager,
+            catalog,
+            profile.slug,
+            args.source,
+            args.kind,
+            args.project_id,
+            assume_yes=args.yes,
+        )
+
+
+def _catalog_menu(manager: ServerManager) -> None:
+    profile = manager.get_profile(_choose_profile(manager))
+    kind = input("Installieren (mod/plugin): ").strip().lower()
+    if kind not in {"mod", "plugin"}:
+        print("Abgebrochen: Bitte 'mod' oder 'plugin' eingeben.")
+        return
+    source = input("Katalog (modrinth/curseforge): ").strip().lower()
+    if source not in {"modrinth", "curseforge"}:
+        print("Abgebrochen: Bitte 'modrinth' oder 'curseforge' eingeben.")
+        return
+    query = input("Suchbegriff: ").strip()
+    catalog = ContentCatalog()
+    projects = catalog.search(source, kind, query, profile, limit=10)
+    if kind == "mod" and source == "curseforge":
+        print("Hinweis: CurseForge filtert nicht verlässlich nach Server-/Client-Seite; bitte die Herstellerangaben prüfen.")
+    if not projects:
+        print("Keine passenden Projekte gefunden.")
+        return
+    for index, project in enumerate(projects, 1):
+        print(f"  {index}. {project.title} [{project.project_id}] — {project.summary}")
+    choice = input("Projekt-Nummer (0 = abbrechen): ").strip()
+    if not choice.isdigit() or int(choice) == 0:
+        return
+    if not 1 <= int(choice) <= len(projects):
+        raise ManagerError("Ungültige Projektauswahl.")
+    _install_catalog_project(manager, catalog, profile.slug, source, kind, projects[int(choice) - 1].project_id)
+
+
 def _menu(manager: ServerManager, store: ConfigStore) -> None:
     _ensure_setup(manager, store)
     while True:
@@ -354,6 +460,7 @@ def _menu(manager: ServerManager, store: ConfigStore) -> None:
             " 10) IP-Adressen und Ports anzeigen\n"
             " 11) Grundeinstellungen / Standardports\n"
             " 12) RCON-Spielertools (nur lokale Verbindung)\n"
+            " 13) Mod-/Plugin-Katalog (Modrinth/CurseForge)\n"
             "  0) Beenden"
         )
         choice = input("Auswahl: ").strip()
@@ -400,9 +507,11 @@ def _menu(manager: ServerManager, store: ConfigStore) -> None:
                 _setup(manager)
             elif choice == "12":
                 _rcon_menu(manager)
+            elif choice == "13":
+                _catalog_menu(manager)
             else:
                 print("Bitte eine gültige Menüoption eingeben.")
-        except (ManagerError, ConfigError, SystemdError, RuntimeErrorMCSC, MinecraftDownloadError, PropertiesError, ValueError, OSError) as exc:
+        except (CatalogError, ManagerError, ConfigError, SystemdError, RuntimeErrorMCSC, MinecraftDownloadError, PropertiesError, ValueError, OSError) as exc:
             print(f"Fehler: {exc}", file=sys.stderr)
 
 
@@ -460,6 +569,23 @@ def build_parser() -> argparse.ArgumentParser:
     set_item.add_argument("count", type=int, nargs="?", default=1, help="Stückzahl 1–64")
     set_item.add_argument("--yes", action="store_true", help="Inventaränderung ausdrücklich bestätigen (nichtinteraktiv erforderlich)")
 
+    catalog = sub.add_parser("catalog", help="Mods/Plugins über Modrinth oder CurseForge suchen und installieren")
+    catalog_sub = catalog.add_subparsers(dest="catalog_action", required=True)
+    catalog_search = catalog_sub.add_parser("search", help="Kompatible Mods/Plugins suchen")
+    catalog_search.add_argument("server", help="Servername oder Profil-Slug")
+    catalog_search.add_argument("query", help="Suchbegriff")
+    catalog_search.add_argument("--source", choices=("modrinth", "curseforge"), required=True)
+    catalog_search.add_argument("--kind", choices=("mod", "plugin"), required=True)
+    catalog_search.add_argument("--limit", type=int, default=10, help="Maximale Trefferzahl (1–50)")
+    catalog_install = catalog_sub.add_parser("install", help="Neueste stabile kompatible Datei installieren")
+    catalog_install.add_argument("server", help="Servername oder Profil-Slug")
+    catalog_install.add_argument("project_id", help="Projekt-ID aus der Suche")
+    catalog_install.add_argument("--source", choices=("modrinth", "curseforge"), required=True)
+    catalog_install.add_argument("--kind", choices=("mod", "plugin"), required=True)
+    catalog_install.add_argument("--yes", action="store_true", help="Dateiinstallation ausdrücklich bestätigen")
+    catalog_list = catalog_sub.add_parser("list", help="Kataloginstallationen eines Profils anzeigen")
+    catalog_list.add_argument("server", help="Servername oder Profil-Slug")
+
     auto = sub.add_parser("autostart", help="Autostart nach Host-Neustart einstellen")
     auto.add_argument("server")
     auto.add_argument("state", choices=("on", "off"))
@@ -498,6 +624,9 @@ def main(argv: list[str] | None = None) -> int:
             manager.services.logs(manager.get_profile(args.server), follow=args.follow)
         elif args.command == "backup":
             print(f"Backup erstellt: {manager.backup(args.server)}")
+        elif args.command == "catalog":
+            _ensure_setup(manager, store)
+            _catalog_command(manager, args)
         elif args.command == "rcon":
             if args.rcon_action == "enable":
                 manager.enable_rcon(args.server)
@@ -542,6 +671,7 @@ def main(argv: list[str] | None = None) -> int:
             parser.print_help()
     except (
         ConfigError,
+        CatalogError,
         ManagerError,
         SystemdError,
         RuntimeErrorMCSC,
