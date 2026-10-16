@@ -2,15 +2,18 @@ import json
 import subprocess
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest.mock import call, patch
 
 from minecraft_server_creator.loaders import (
+    ARCLIGHT_RELEASES_URL,
     FABRIC_META_URL,
     FORGE_MAVEN_BASE,
     FORGE_PROMOTIONS_URL,
     NEOFORGE_MAVEN_BASE,
     NEOFORGE_METADATA_URL,
+    ArclightInstaller,
     FabricInstaller,
     ForgeInstaller,
     LoaderInstallError,
@@ -23,6 +26,14 @@ def _write_fake_download(_url, destination, **_kwargs):
     target = Path(destination)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(b"fake installer")
+    return target
+
+
+def _write_fake_jar(url, destination, **_kwargs):
+    target = Path(destination)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(target, "w") as archive:
+        archive.writestr("META-INF/MANIFEST.MF", "Manifest-Version: 1.0\\n")
     return target
 
 
@@ -224,6 +235,84 @@ class NeoForgeInstallerTests(unittest.TestCase):
             with self.assertRaisesRegex(LoaderInstallError, "maven.neoforged.net"):
                 _fetch_official_text("https://evil.example/metadata.xml", "maven.neoforged.net")
             open_url.assert_not_called()
+
+
+class ArclightInstallerTests(unittest.TestCase):
+    def test_selects_family_specific_stable_release_and_verifies_sha256(self):
+        checksum = "d" * 64
+        release = {
+            "tag_name": "FeudalKings/1.0.1",
+            "draft": False,
+            "prerelease": False,
+            "assets": [
+                {
+                    "name": "arclight-fabric-1.21.1-1.0.1-8ec9529.jar",
+                    "browser_download_url": "https://github.com/IzzelAliz/Arclight/releases/download/FeudalKings/1.0.1/arclight-fabric-1.21.1-1.0.1-8ec9529.jar",
+                    "digest": f"sha256:{checksum}",
+                },
+                {
+                    "name": "arclight-forge-1.21.1-1.0.1-8ec9529.jar",
+                    "browser_download_url": "https://github.com/IzzelAliz/Arclight/releases/download/FeudalKings/1.0.1/arclight-forge-1.21.1-1.0.1-8ec9529.jar",
+                    "digest": f"sha256:{checksum}",
+                },
+            ],
+        }
+        with tempfile.TemporaryDirectory() as temp:
+            server_dir = Path(temp)
+            with patch("minecraft_server_creator.loaders._fetch_official_json", return_value=[release]) as fetch:
+                with patch("minecraft_server_creator.loaders.download_file", side_effect=_write_fake_jar) as download:
+                    result = ArclightInstaller().install(
+                        "1.21.1", {"id": "1.21.1"}, server_dir, "forge"
+                    )
+            self.assertEqual(result, LoaderInstallResult("1.0.1-8ec9529", "jar", "server.jar", "forge"))
+            fetch.assert_called_once_with(f"{ARCLIGHT_RELEASES_URL}?per_page=100&page=1", "api.github.com")
+            download.assert_called_once_with(
+                release["assets"][1]["browser_download_url"],
+                server_dir / "server.jar",
+                checksum=checksum,
+                algorithm="sha256",
+                timeout=180.0,
+            )
+            saved = json.loads((server_dir / "arclight-loader.json").read_text())
+            self.assertEqual(saved["loader_family"], "forge")
+            self.assertTrue((server_dir / "server.jar").is_file())
+
+    def test_skips_prereleases_and_rejects_unsupported_builds(self):
+        snapshot = {
+            "tag_name": "1.0.0-SNAPSHOT",
+            "draft": False,
+            "prerelease": True,
+            "assets": [
+                {
+                    "name": "arclight-fabric-1.21.1-1.0.0-SNAPSHOT.jar",
+                    "browser_download_url": "https://github.com/IzzelAliz/Arclight/releases/download/snapshot.jar",
+                }
+            ],
+        }
+        with patch(
+            "minecraft_server_creator.loaders._fetch_official_json",
+            side_effect=[[snapshot], []],
+        ):
+            with self.assertRaisesRegex(LoaderInstallError, "keinen stabilen fabric-Build"):
+                ArclightInstaller().install("1.21.1", {"id": "1.21.1"}, tempfile.gettempdir(), "fabric")
+
+    def test_rejects_untrusted_asset_host(self):
+        release = {
+            "draft": False,
+            "prerelease": False,
+            "assets": [
+                {
+                    "name": "arclight-neoforge-1.21.1-1.0.1.jar",
+                    "browser_download_url": "https://evil.example/arclight.jar",
+                }
+            ],
+        }
+        with patch(
+            "minecraft_server_creator.loaders._fetch_official_json",
+            side_effect=[[release], []],
+        ):
+            with self.assertRaisesRegex(LoaderInstallError, "keinen stabilen neoforge-Build"):
+                ArclightInstaller().install("1.21.1", {"id": "1.21.1"}, tempfile.gettempdir(), "neoforge")
 
 
 if __name__ == "__main__":

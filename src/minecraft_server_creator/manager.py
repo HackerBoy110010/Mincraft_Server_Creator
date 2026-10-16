@@ -14,7 +14,7 @@ from typing import Callable
 from .config import AppConfig, ConfigStore, data_directory
 from .minecraft import MinecraftMetadataClient
 from .launch import LaunchConfigurationError, validate_profile_launch
-from .loaders import FabricInstaller, ForgeInstaller, LoaderInstallResult, NeoForgeInstaller
+from .loaders import ArclightInstaller, FabricInstaller, ForgeInstaller, LoaderInstallResult, NeoForgeInstaller
 from .models import IMPLEMENTED_SERVER_TYPES, PortSettings, ServerProfile, slugify, validate_port
 from .network import port_available
 from .properties import read_properties, update_properties
@@ -45,6 +45,7 @@ class ServerManager:
         fabric: FabricInstaller | None = None,
         forge: ForgeInstaller | None = None,
         neoforge: NeoForgeInstaller | None = None,
+        arclight: ArclightInstaller | None = None,
     ) -> None:
         self.store = store or ConfigStore()
         self.metadata = metadata or MinecraftMetadataClient()
@@ -53,6 +54,7 @@ class ServerManager:
         self.fabric = fabric or FabricInstaller()
         self.forge = forge or ForgeInstaller()
         self.neoforge = neoforge or NeoForgeInstaller()
+        self.arclight = arclight or ArclightInstaller()
 
     def load(self) -> AppConfig:
         return self.store.load()
@@ -75,6 +77,7 @@ class ServerManager:
         *,
         server_type: str = "vanilla",
         version: str | None = "latest",
+        arclight_loader: str | None = None,
         ports: PortSettings | None = None,
         memory_mb: int = 4096,
         auto_start_on_boot: bool = False,
@@ -83,8 +86,13 @@ class ServerManager:
         if server_type not in IMPLEMENTED_SERVER_TYPES:
             raise ManagerError(
                 f"{server_type} ist bereits in der Planung, aber noch nicht implementiert. "
-                "Aktuell sind Vanilla, Fabric, Forge und NeoForge verfügbar."
+                "Aktuell sind Vanilla, Fabric, Forge, NeoForge und Arclight verfügbar."
             )
+        if server_type == "arclight":
+            if arclight_loader not in ArclightInstaller.FAMILIES:
+                raise ManagerError("Arclight benötigt die explizite Basis-Auswahl fabric, forge oder neoforge.")
+        elif arclight_loader is not None:
+            raise ManagerError("--arclight-loader darf nur für Arclight-Profile gesetzt werden.")
         if not name.strip():
             raise ManagerError("Der Servername darf nicht leer sein.")
         if memory_mb < 1024:
@@ -121,6 +129,13 @@ class ServerManager:
                 installer_java = self.runtimes.ensure(int(java_major))
                 installer = self.forge if server_type == "forge" else self.neoforge
                 loader_install = installer.install(minecraft_version, version_info, temp_dir, installer_java)
+            elif server_type == "arclight":
+                loader_install = self.arclight.install(
+                    minecraft_version,
+                    version_info,
+                    temp_dir,
+                    str(arclight_loader),
+                )
             (temp_dir / "eula.txt").write_text("eula=false\n", encoding="utf-8")
             update_properties(
                 temp_dir / "server.properties",
@@ -145,6 +160,7 @@ class ServerManager:
                 server_dir=str(temp_dir),
                 memory_mb=memory_mb,
                 loader_version=loader_install.loader_version if loader_install else None,
+                loader_family=loader_install.loader_family if loader_install else None,
                 launch_mode=loader_install.launch_mode if loader_install else "jar",
                 launch_target=loader_install.launch_target if loader_install else "server.jar",
                 ports=ports,

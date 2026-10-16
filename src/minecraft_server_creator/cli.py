@@ -8,7 +8,7 @@ import sys
 from .config import AppConfig, ConfigError, ConfigStore
 from .manager import ManagerError, ServerManager
 from .minecraft import MinecraftDownloadError
-from .models import IMPLEMENTED_SERVER_TYPES, SERVER_TYPES, PortSettings, ValidationError, validate_port
+from .models import ARCLIGHT_LOADER_FAMILIES, IMPLEMENTED_SERVER_TYPES, SERVER_TYPES, PortSettings, ValidationError, validate_port
 from .network import describe_endpoints, get_lan_ip, get_public_ip, port_available
 from .properties import PropertiesError, read_properties
 from .rcon import inventory_editing_disabled_reason
@@ -89,7 +89,8 @@ def _choose_profile(manager: ServerManager) -> str:
     print("Serverprofile:")
     for index, profile in enumerate(config.profiles, 1):
         state = "läuft" if manager.services.is_active(profile) else "gestoppt"
-        print(f"  {index}. {profile.name} ({profile.server_type}, MC {profile.minecraft_version}) — {state}")
+        server_type = f"arclight/{profile.loader_family}" if profile.loader_family else profile.server_type
+        print(f"  {index}. {profile.name} ({server_type}, MC {profile.minecraft_version}) — {state}")
     answer = input("Auswahl (Nummer oder Name): ").strip()
     if answer.isdigit() and 1 <= int(answer) <= len(config.profiles):
         return config.profiles[int(answer) - 1].slug
@@ -114,8 +115,17 @@ def _create(manager: ServerManager, args: argparse.Namespace) -> None:
     server_type = server_type or "vanilla"
     if server_type not in IMPLEMENTED_SERVER_TYPES:
         raise ManagerError(
-            f"{server_type} ist noch nicht verfügbar; momentan können Vanilla, Fabric, Forge und NeoForge installiert werden."
+            f"{server_type} ist noch nicht verfügbar; momentan können Vanilla, Fabric, Forge, NeoForge und Arclight installiert werden."
         )
+    arclight_loader = getattr(args, "arclight_loader", None)
+    if server_type == "arclight":
+        if arclight_loader is None and interactive:
+            print("Arclight-Basis: " + ", ".join(ARCLIGHT_LOADER_FAMILIES))
+            arclight_loader = input("Basis-Loader (fabric/forge/neoforge): ").strip().lower()
+        if arclight_loader not in ARCLIGHT_LOADER_FAMILIES:
+            raise ManagerError("Für Arclight musst du --arclight-loader fabric, forge oder neoforge angeben.")
+    elif arclight_loader is not None:
+        raise ManagerError("--arclight-loader darf nur zusammen mit --type arclight verwendet werden.")
     version = args.version
     if version is None:
         if interactive:
@@ -140,7 +150,8 @@ def _create(manager: ServerManager, args: argparse.Namespace) -> None:
         if interactive else defaults.voice_udp
     )
     ports = PortSettings(java_tcp=java_port, bedrock_udp=bedrock_port, voice_udp=voice_port)
-    download_message = f"{server_type.capitalize()}-Server '{name}' wird geladen."
+    display_type = f"Arclight ({arclight_loader})" if server_type == "arclight" else server_type.capitalize()
+    download_message = f"{display_type}-Server '{name}' wird geladen."
     if server_type in {"forge", "neoforge"}:
         download_message += " Die passende verwaltete Temurin-JRE wird für den Installer bei Bedarf ebenfalls geladen."
     if not _yes_no(download_message + " Fortfahren?", default=True):
@@ -150,6 +161,7 @@ def _create(manager: ServerManager, args: argparse.Namespace) -> None:
         name,
         server_type=server_type,
         version=version,
+        arclight_loader=arclight_loader,
         ports=ports,
         memory_mb=memory,
         auto_start_on_boot=args.autostart,
@@ -157,7 +169,8 @@ def _create(manager: ServerManager, args: argparse.Namespace) -> None:
     print(f"\nServerprofil '{profile.name}' wurde angelegt.")
     print(f"Minecraft: {profile.minecraft_version}; Java {profile.java_major}; Typ: {profile.server_type}")
     if profile.loader_version:
-        print(f"Loader-Version: {profile.loader_version}")
+        family = f" ({profile.loader_family})" if profile.loader_family else ""
+        print(f"Loader-Version{family}: {profile.loader_version}")
     print(f"Dateien: {profile.server_dir}")
     print("Vor dem ersten Start musst du der Minecraft-EULA ausdrücklich zustimmen.\n")
 
@@ -206,7 +219,8 @@ def _show_list(manager: ServerManager) -> None:
         auto = "Autostart an" if profile.auto_start_on_boot else "Autostart aus"
         bedrock = str(profile.ports.bedrock_udp) if profile.ports.bedrock_udp else "aus"
         voice = str(profile.ports.voice_udp) if profile.ports.voice_udp else "aus"
-        loader = f" / Loader {profile.loader_version}" if profile.loader_version else ""
+        family = f" ({profile.loader_family})" if profile.loader_family else ""
+        loader = f" / Loader{family} {profile.loader_version}" if profile.loader_version else ""
         print(
             f"- {profile.name} [{profile.slug}] | {profile.server_type} {profile.minecraft_version}{loader} | {state} | {auto}\n"
             f"  Java TCP {profile.ports.java_tcp}; Bedrock UDP {bedrock}; Voice UDP {voice}"
@@ -329,7 +343,7 @@ def _menu(manager: ServerManager, store: ConfigStore) -> None:
         print(
             "\nMinecraft Server Creator\n"
             "  1) Server anzeigen\n"
-            "  2) Server anlegen (Vanilla/Fabric/Forge/NeoForge)\n"
+            "  2) Server anlegen (Vanilla/Fabric/Forge/NeoForge/Arclight)\n"
             "  3) Server starten\n"
             "  4) Server stoppen\n"
             "  5) Geführte Servereinstellungen ändern\n"
@@ -349,8 +363,9 @@ def _menu(manager: ServerManager, store: ConfigStore) -> None:
             if choice == "1":
                 _show_list(manager)
             elif choice == "2":
-                _create(manager, argparse.Namespace(name=None, type=None, version=None, memory_mb=None,
-                                                    java_port=None, bedrock_port=_UNSET, voice_port=_UNSET, autostart=False))
+                _create(manager, argparse.Namespace(name=None, type=None, version=None, arclight_loader=None,
+                                                    memory_mb=None, java_port=None, bedrock_port=_UNSET,
+                                                    voice_port=_UNSET, autostart=False))
             elif choice == "3":
                 _start(manager, _choose_profile(manager))
             elif choice == "4":
@@ -402,7 +417,13 @@ def build_parser() -> argparse.ArgumentParser:
     configure.add_argument("server", help="Servername oder Profil-Slug")
     create = sub.add_parser("create", help="Minecraft-Serverprofil anlegen")
     create.add_argument("name", nargs="?", help="Anzeigename des Servers")
-    create.add_argument("--type", choices=SERVER_TYPES, default=None, help="Servertyp (Vanilla, Fabric, Forge oder NeoForge verfügbar)")
+    create.add_argument("--type", choices=SERVER_TYPES, default=None, help="Servertyp (alle fünf Typen verfügbar)")
+    create.add_argument(
+        "--arclight-loader",
+        choices=ARCLIGHT_LOADER_FAMILIES,
+        default=None,
+        help="Arclight-Basis auswählen (fabric, forge oder neoforge)",
+    )
     create.add_argument("--version", default=None, help="Minecraft-Version oder 'latest'")
     create.add_argument("--memory-mb", type=int, default=None, help="Maximaler Arbeitsspeicher in MB")
     create.add_argument("--java-port", type=int, default=None, help="Java-Port/TCP")

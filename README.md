@@ -6,10 +6,11 @@ SSH-freundlicher Minecraft-Server-Manager mit einfachem Python-Textmenü. Das Re
 
 - lokale Konfiguration und getrennte Serverprofile
 - Erstkonfiguration mit Serverordner und globalen Port-Standardwerten; Werte lassen sich pro Profil überschreiben
-- Installation von Vanilla-, Fabric-, Forge- und NeoForge-Java-Servern; Mojang/Fabric-Meta liefern Metadaten, Forge/NeoForge nutzen ihre offiziellen Maven-Installer
+- Installation von Vanilla, Fabric, Forge, NeoForge und Arclight aus den jeweiligen offiziellen Metadaten/Downloads; Arclight verlangt eine explizite Basis-Auswahl (Fabric/Forge/NeoForge)
 - neueste stabile Version als Vorgabe; konkrete veröffentlichte Versionen können angegeben werden
 - passende Java-Laufzeit über Adoptium/Temurin verwalten und SHA-256 vor dem Entpacken prüfen
 - Forge-/NeoForge-Installer verwenden verifizierte offizielle Installer-Dateien; systemd startet deren erzeugte `unix_args.txt` statt eines Vanilla-JARs
+- Arclight lädt nur stabile passende Release-JARs vom offiziellen GitHub-Projekt; veröffentlichte SHA-256-Digests werden geprüft
 - EULA-Zustimmung ausdrücklich vor dem ersten Start
 - Start/Stop/Status über einen systemd-Benutzerdienst; optionaler Autostart nach Host-Neustart
 - Portkonfliktprüfung und Anzeige von LAN-/öffentlicher IP mit konfigurierten Endpunkten
@@ -19,7 +20,7 @@ SSH-freundlicher Minecraft-Server-Manager mit einfachem Python-Textmenü. Das Re
 - Online-Spielerliste und Live-Spielerdaten; Inventar lesen sowie einzelne Plätze bei Vanilla 1.17+ ändern
 - Python-Quellinstallation und interaktives Terminalmenü
 
-**Noch nicht implementiert:** Arclight, Mod-/Plugin-Downloads, automatische Firewallregeln und Backup-Wiederherstellung. RCON ist nur für Vanilla eingebunden und im echten Minecraft-Serverbetrieb noch nicht live getestet; Inventarzugriff betrifft ausschließlich online befindliche Spieler. Die Vanilla-, Fabric-, Forge- und NeoForge-Installer sind unit-getestet, wurden aber noch nicht mit echten Downloads und Serverstarts live verifiziert. Forge/NeoForge führen den offiziellen Installer bei der Profilerstellung mit der passend verwalteten Temurin-JRE aus. Nicht unterstützte oder nicht kompatible Loader-Builds werden abgelehnt.
+**Noch nicht implementiert:** Mod-/Plugin-Downloads, automatische Firewallregeln und Backup-Wiederherstellung. RCON ist nur für Vanilla eingebunden und im echten Minecraft-Serverbetrieb noch nicht live getestet; Inventarzugriff betrifft ausschließlich online befindliche Spieler. Die Vanilla-, Fabric-, Forge-, NeoForge- und Arclight-Installer sind unit-getestet, aber echte Downloads und Serverstarts noch nicht live verifiziert. Forge/NeoForge führen den offiziellen Installer bei der Profilerstellung mit der passend verwalteten Temurin-JRE aus. Arclight verlangt die explizite Basis-Auswahl `fabric`, `forge` oder `neoforge`. Nicht unterstützte oder nicht kompatible Loader-Builds werden abgelehnt.
 
 ## Voraussetzungen
 
@@ -58,6 +59,8 @@ Beim Anlegen eines Servers kann man die Werte übernehmen oder pro Serverprofil 
 ```bash
 mcsc setup
 mcsc create zuhause --type vanilla --version latest
+# Arclight benötigt eine ausdrückliche Basis-Auswahl:
+mcsc create hybrid --type arclight --arclight-loader forge --version latest
 mcsc list
 mcsc start zuhause
 mcsc status
@@ -102,7 +105,7 @@ python -m unittest discover -s tests -v
 ## Geplante Ausbaustufen
 
 1. Vanilla-Grundlage, Profile, Ports, Java-Verwaltung und systemd (Umsetzung begonnen; Live-Serverbetrieb noch nicht verifiziert)
-2. Arclight und Live-Smoke-Tests für Vanilla, Fabric, Forge und NeoForge
+2. Live-Smoke-Tests für Vanilla, Fabric, Forge, NeoForge und Arclight
 3. geprüfter Mod-/Plugin-Katalog über Modrinth und CurseForge
 4. RCON-/Inventar-Kompatibilität für weitere Servertypen und Versionen, Backup-Wiederherstellung sowie Live-Serverprüfung
 5. Linux-x64-/ARM64-Release-Pakete und Distributionstests; später Windows/macOS

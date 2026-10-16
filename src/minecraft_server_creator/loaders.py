@@ -6,18 +6,21 @@ from pathlib import Path
 import re
 import subprocess
 from typing import Any
+import zipfile
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlparse
 from urllib.request import Request, urlopen
 import xml.etree.ElementTree as ET
 
 from .minecraft import MinecraftDownloadError, USER_AGENT, download_file
+from .models import ARCLIGHT_LOADER_FAMILIES
 
 FABRIC_META_URL = "https://meta.fabricmc.net/v2/versions"
 FORGE_PROMOTIONS_URL = "https://files.minecraftforge.net/net/minecraftforge/forge/promotions_slim.json"
 FORGE_MAVEN_BASE = "https://maven.minecraftforge.net/net/minecraftforge/forge"
 NEOFORGE_METADATA_URL = "https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml"
 NEOFORGE_MAVEN_BASE = "https://maven.neoforged.net/releases/net/neoforged/neoforge"
+ARCLIGHT_RELEASES_URL = "https://api.github.com/repos/IzzelAliz/Arclight/releases"
 
 
 class LoaderInstallError(MinecraftDownloadError):
@@ -31,6 +34,7 @@ class LoaderInstallResult:
     loader_version: str
     launch_mode: str
     launch_target: str
+    loader_family: str | None = None
 
 
 def _fetch_json(url: str) -> Any:
@@ -336,3 +340,111 @@ class NeoForgeInstaller:
             },
         )
         return LoaderInstallResult(loader_version, "args", launch_target)
+
+
+class ArclightInstaller:
+    """Install the latest stable Arclight jar for a selected underlying mod loader."""
+
+    FAMILIES = frozenset(ARCLIGHT_LOADER_FAMILIES)
+
+    def install(
+        self,
+        minecraft_version: str,
+        version_info: dict[str, Any],
+        server_dir: str | Path,
+        loader_family: str,
+    ) -> LoaderInstallResult:
+        if loader_family not in self.FAMILIES:
+            raise LoaderInstallError("Arclight benötigt als Basis Fabric, Forge oder NeoForge.")
+        if not re.fullmatch(r"\d+(?:\.\d+){1,2}", minecraft_version):
+            raise LoaderInstallError("Arclight kann nur für veröffentlichte numerische Minecraft-Versionen installiert werden.")
+
+        selected: tuple[dict[str, Any], dict[str, Any], str] | None = None
+        for page in range(1, 6):
+            releases = _fetch_official_json(
+                f"{ARCLIGHT_RELEASES_URL}?per_page=100&page={page}", "api.github.com"
+            )
+            if not isinstance(releases, list):
+                raise LoaderInstallError("GitHub lieferte keine gültige Arclight-Release-Liste.")
+            if not releases:
+                break
+            prefix = f"arclight-{loader_family}-{minecraft_version}-"
+            for release in releases:
+                if not isinstance(release, dict) or release.get("draft") or release.get("prerelease"):
+                    continue
+                assets = release.get("assets")
+                if not isinstance(assets, list):
+                    continue
+                for asset in assets:
+                    if not isinstance(asset, dict):
+                        continue
+                    name = asset.get("name")
+                    url = asset.get("browser_download_url")
+                    if not isinstance(name, str) or not name.startswith(prefix) or not name.endswith(".jar"):
+                        continue
+                    build_version = name[len(prefix) : -4]
+                    if (
+                        not build_version
+                        or re.search(r"snapshot|alpha|beta|(?:^|[._-])pre|(?:^|[._-])rc", build_version, re.IGNORECASE)
+                        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,80}", build_version)
+                        or Path(name).name != name
+                        or "\\" in name
+                    ):
+                        continue
+                    if not isinstance(url, str):
+                        continue
+                    parsed = urlparse(url)
+                    if (
+                        parsed.scheme != "https"
+                        or parsed.hostname != "github.com"
+                        or parsed.port not in (None, 443)
+                        or parsed.username is not None
+                        or parsed.password is not None
+                        or not parsed.path.startswith("/IzzelAliz/Arclight/releases/download/")
+                    ):
+                        continue
+                    selected = release, asset, build_version
+                    break
+                if selected:
+                    break
+            if selected:
+                break
+
+        if selected is None:
+            raise LoaderInstallError(
+                f"Arclight hat keinen stabilen {loader_family}-Build für Minecraft {minecraft_version}."
+            )
+        release, asset, loader_version = selected
+        download_url = str(asset["browser_download_url"])
+        digest = asset.get("digest")
+        checksum = None
+        if digest is not None:
+            if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-fA-F]{64}", digest):
+                raise LoaderInstallError("Arclight hat eine ungültige SHA-256-Prüfsumme veröffentlicht.")
+            checksum = digest.split(":", 1)[1].lower()
+
+        server_path = Path(server_dir) / "server.jar"
+        download_file(
+            download_url,
+            server_path,
+            checksum=checksum,
+            algorithm="sha256",
+            timeout=180.0,
+        )
+        if not zipfile.is_zipfile(server_path):
+            raise LoaderInstallError("Der Arclight-Download ist kein gültiges JAR-Archiv.")
+        _write_metadata(Path(server_dir), "minecraft-version.json", version_info)
+        _write_metadata(
+            Path(server_dir),
+            "arclight-loader.json",
+            {
+                "minecraft_version": minecraft_version,
+                "loader_family": loader_family,
+                "loader_version": loader_version,
+                "release_tag": release.get("tag_name"),
+                "asset": asset.get("name"),
+                "sha256": checksum,
+                "source": download_url,
+            },
+        )
+        return LoaderInstallResult(loader_version, "jar", "server.jar", loader_family)

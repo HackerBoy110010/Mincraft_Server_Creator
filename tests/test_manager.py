@@ -61,6 +61,13 @@ class FakeNeoForge:
         return LoaderInstallResult(loader_version, "args", target)
 
 
+class FakeArclight:
+    def install(self, version, version_info, server_dir, loader_family):
+        target = Path(server_dir) / "server.jar"
+        target.write_bytes(b"fake Arclight server jar")
+        return LoaderInstallResult("1.0.1-8ec9529", "jar", "server.jar", loader_family)
+
+
 class FakeServices:
     def __init__(self, active=False):
         self.active = active
@@ -143,6 +150,22 @@ class ManagerTests(unittest.TestCase):
             self.assertEqual(profile.loader_version, "21.1.100")
             self.assertTrue((Path(profile.server_dir) / expected).is_file())
 
+    def test_create_arclight_profile_requires_and_persists_base_loader(self):
+        with tempfile.TemporaryDirectory() as temp:
+            manager = ServerManager(
+                store=ConfigStore(Path(temp) / "config.json"),
+                metadata=FakeMetadata(),
+                arclight=FakeArclight(),
+            )
+            manager.setup(Path(temp) / "servers", PortSettings())
+            with self.assertRaisesRegex(ManagerError, "explizite Basis-Auswahl"):
+                manager.create_server("Arclight missing base", server_type="arclight")
+            profile = manager.create_server("Arclight forge", server_type="arclight", arclight_loader="forge")
+            self.assertEqual(profile.loader_family, "forge")
+            self.assertEqual(profile.loader_version, "1.0.1-8ec9529")
+            self.assertTrue((Path(profile.server_dir) / "server.jar").is_file())
+            self.assertEqual(manager.get_profile(profile.slug).loader_family, "forge")
+
     def test_guided_settings_validate_and_update_properties(self):
         with tempfile.TemporaryDirectory() as temp:
             manager = ServerManager(store=ConfigStore(Path(temp) / "config.json"), metadata=FakeMetadata())
@@ -160,12 +183,12 @@ class ManagerTests(unittest.TestCase):
             with self.assertRaises(ManagerError):
                 manager.update_settings(profile.slug, {"difficulty": "impossible"})
 
-    def test_rejects_unimplemented_loader_without_creating_profile(self):
+    def test_rejects_unknown_server_type_without_creating_profile(self):
         with tempfile.TemporaryDirectory() as temp:
             manager = ServerManager(store=ConfigStore(Path(temp) / "config.json"), metadata=FakeMetadata())
             manager.setup(Path(temp) / "servers", PortSettings())
             with self.assertRaisesRegex(Exception, "noch nicht implementiert"):
-                manager.create_server("Arclight world", server_type="arclight")
+                manager.create_server("Unsupported world", server_type="unknown")
             self.assertEqual(manager.load().profiles, [])
 
     def test_rcon_is_local_only_and_secret_is_private(self):

@@ -7,7 +7,8 @@ import unicodedata
 from typing import Any
 
 SERVER_TYPES = ("vanilla", "fabric", "forge", "neoforge", "arclight")
-IMPLEMENTED_SERVER_TYPES = frozenset({"vanilla", "fabric", "forge", "neoforge"})
+ARCLIGHT_LOADER_FAMILIES = ("fabric", "forge", "neoforge")
+IMPLEMENTED_SERVER_TYPES = frozenset({"vanilla", "fabric", "forge", "neoforge", "arclight"})
 
 
 class ValidationError(ValueError):
@@ -80,6 +81,7 @@ class ServerProfile:
     eula_accepted: bool = False
     created_at: str = ""
     loader_version: str | None = None
+    loader_family: str | None = None
     launch_mode: str = "jar"
     launch_target: str = "server.jar"
 
@@ -98,6 +100,10 @@ class ServerProfile:
             r"[A-Za-z0-9][A-Za-z0-9._+-]{0,63}", self.loader_version
         ):
             raise ValidationError("Die Loader-Version enthält ungültige Zeichen.")
+        if self.server_type == "arclight" and self.loader_family not in {"fabric", "forge", "neoforge"}:
+            raise ValidationError("Für Arclight muss Fabric, Forge oder NeoForge als Basis gewählt werden.")
+        if self.server_type != "arclight" and self.loader_family is not None:
+            raise ValidationError("Eine Loader-Familie darf nur für Arclight-Profile gesetzt sein.")
         if self.launch_mode not in {"jar", "args"}:
             raise ValidationError("Das Server-Startverfahren ist ungültig.")
         target = self.launch_target.replace("\\", "/")
@@ -130,6 +136,7 @@ class ServerProfile:
             server_dir=str(data["server_dir"]),
             memory_mb=int(data.get("memory_mb", 4096)),
             loader_version=(str(data["loader_version"]) if data.get("loader_version") is not None else None),
+            loader_family=(str(data["loader_family"]) if data.get("loader_family") is not None else None),
             launch_mode=str(data.get("launch_mode", "jar")),
             launch_target=str(data.get("launch_target", "server.jar")),
             ports=PortSettings.from_dict(data.get("ports")),
@@ -149,6 +156,7 @@ class ServerProfile:
             "server_dir": self.server_dir,
             "memory_mb": self.memory_mb,
             "loader_version": self.loader_version,
+            "loader_family": self.loader_family,
             "launch_mode": self.launch_mode,
             "launch_target": self.launch_target,
             "ports": self.ports.to_dict(),

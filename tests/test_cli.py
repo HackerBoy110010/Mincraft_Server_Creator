@@ -12,6 +12,10 @@ class CliParserTests(unittest.TestCase):
         self.assertEqual(args.java_port, 25570)
         forge = parser.parse_args(["create", "modded", "--type", "forge"])
         self.assertEqual(forge.type, "forge")
+        arclight = parser.parse_args(
+            ["create", "hybrid", "--type", "arclight", "--arclight-loader", "neoforge"]
+        )
+        self.assertEqual(arclight.arclight_loader, "neoforge")
 
     def test_optional_port_can_be_disabled_explicitly(self):
         parser = build_parser()

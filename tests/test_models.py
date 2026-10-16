@@ -38,6 +38,34 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(restored.launch_mode, "args")
         self.assertEqual(restored.launch_target, profile.launch_target)
 
+    def test_arclight_profile_round_trips_selected_base_loader(self):
+        profile = ServerProfile(
+            id="arc1",
+            name="Arclight",
+            slug="arclight",
+            server_type="arclight",
+            minecraft_version="1.21.1",
+            java_major=21,
+            server_dir="/tmp/arclight",
+            loader_version="1.0.1-8ec9529",
+            loader_family="forge",
+        )
+        restored = ServerProfile.from_dict(profile.to_dict())
+        self.assertEqual(restored.loader_family, "forge")
+        self.assertEqual(restored.launch_target, "server.jar")
+
+    def test_arclight_requires_supported_base_loader(self):
+        with self.assertRaises(ValidationError):
+            ServerProfile(
+                id="arc1",
+                name="Arclight",
+                slug="arclight",
+                server_type="arclight",
+                minecraft_version="1.21.1",
+                java_major=21,
+                server_dir="/tmp/arclight",
+            )
+
     def test_profile_rejects_unsafe_launch_target(self):
         with self.assertRaises(ValidationError):
             ServerProfile(
