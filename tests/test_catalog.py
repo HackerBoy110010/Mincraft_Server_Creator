@@ -136,7 +136,7 @@ class ContentCatalogTests(unittest.TestCase):
             self.assertEqual(plan.required_dependencies, ("dependency1",))
             with patch("minecraft_server_creator.catalog.download_file", side_effect=_write_zip) as download:
                 installed = catalog.install(plan, profile)
-            self.assertEqual(installed, Path(profile.server_dir) / "mods" / "example-mod-2.0.0.jar")
+            self.assertEqual(installed, Path(profile.server_dir).resolve() / "mods" / "example-mod-2.0.0.jar")
             download.assert_called_once_with(
                 plan.download_url,
                 installed,
