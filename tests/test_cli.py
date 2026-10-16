@@ -16,11 +16,19 @@ class CliParserTests(unittest.TestCase):
         args = parser.parse_args(["create", "my-world", "--bedrock-port", "off"])
         self.assertIsNone(args.bedrock_port)
 
+    def test_rcon_item_command_arguments(self):
+        args = build_parser().parse_args(["rcon", "set-item", "home", "Alex", "5", "diamond", "3", "--yes"])
+        self.assertEqual(args.command, "rcon")
+        self.assertEqual(args.rcon_action, "set-item")
+        self.assertEqual((args.server, args.player, args.slot, args.item, args.count), ("home", "Alex", 5, "diamond", 3))
+        self.assertTrue(args.yes)
+
     def test_help_parser_has_expected_commands(self):
         parser = build_parser()
         choices = parser._subparsers._group_actions[0].choices
         self.assertIn("create", choices)
         self.assertIn("configure", choices)
+        self.assertIn("rcon", choices)
         self.assertIn("start", choices)
         self.assertIn("autostart", choices)
 

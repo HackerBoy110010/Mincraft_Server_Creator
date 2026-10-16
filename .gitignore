@@ -15,3 +15,15 @@ dist/
 MinecraftServers/
 *.rcon
 *.secret
+
+# Keep managed server data and secrets out of Git even with a custom profile root
+**/server.jar
+**/server.properties
+**/eula.txt
+**/rcon-password
+**/world/
+**/world_nether/
+**/world_the_end/
+**/backups/
+**/plugins/*.jar
+**/mods/*.jar

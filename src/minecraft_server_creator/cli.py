@@ -11,6 +11,7 @@ from .minecraft import MinecraftDownloadError
 from .models import IMPLEMENTED_SERVER_TYPES, SERVER_TYPES, PortSettings, ValidationError, validate_port
 from .network import describe_endpoints, get_lan_ip, get_public_ip, port_available
 from .properties import PropertiesError, read_properties
+from .rcon import inventory_editing_disabled_reason
 from .runtimes import RuntimeErrorMCSC
 from .systemd import SystemdError, SystemdUserService
 
@@ -257,6 +258,63 @@ def _configure(manager: ServerManager, selector: str) -> None:
     print("Servereinstellungen gespeichert. Sie werden beim nächsten Start übernommen.")
 
 
+def _rcon_menu(manager: ServerManager) -> None:
+    profile = manager.get_profile(_choose_profile(manager))
+    if not manager.rcon_is_enabled(profile.slug):
+        if manager.services.is_active(profile):
+            raise ManagerError("Stoppe den Server, bevor du lokales RCON einrichtest.")
+        if not _yes_no(
+            "RCON aktivieren? Es wird ausschließlich an 127.0.0.1 gebunden; das Passwort bleibt lokal.",
+            default=False,
+        ):
+            return
+        manager.enable_rcon(profile.slug)
+        print("Lokales RCON ist eingerichtet. Starte den Server, damit es aktiv wird.")
+        return
+    if not manager.services.is_active(profile):
+        raise ManagerError("RCON ist eingerichtet. Starte den Server, bevor du die Spielertools verwendest.")
+
+    while True:
+        print(
+            f"{chr(10)}RCON-Spielertools für {profile.name} (nur online befindliche Spieler){chr(10)}"
+            "  1) Online-Spieler anzeigen\n"
+            "  2) Spielerwerte/Scoreboard anzeigen\n"
+            "  3) Live-Inventar anzeigen\n"
+            "  4) Inventarplatz ändern\n"
+            "  0) Zurück"
+        )
+        choice = input("Auswahl: ").strip()
+        if choice == "0":
+            return
+        if choice == "1":
+            print(manager.rcon_players(profile.slug))
+        elif choice in {"2", "3"}:
+            player = input("Online-Spielername: ").strip()
+            result = (
+                manager.rcon_player_stats(profile.slug, player)
+                if choice == "2"
+                else manager.rcon_inventory(profile.slug, player)
+            )
+            print(result or "Keine Daten zurückgegeben.")
+        elif choice == "4":
+            reason = inventory_editing_disabled_reason(profile.server_type, profile.minecraft_version)
+            if reason:
+                print(f"Inventarbearbeitung deaktiviert: {reason}")
+                continue
+            player = input("Online-Spielername: ").strip()
+            slot = int(input("Inventarplatz (0–35): ").strip())
+            item = input("Item-ID (zum Beispiel minecraft:diamond oder air): ").strip()
+            count_raw = input("Stückzahl [1]: ").strip()
+            count = int(count_raw) if count_raw else 1
+            if not _yes_no(f"{item} × {count} in Platz {slot} von {player} einsetzen?", default=False):
+                print("Nicht geändert.")
+                continue
+            result = manager.rcon_set_inventory_item(profile.slug, player, slot, item, count)
+            print(result or "Befehl gesendet; der Server hat keine Textantwort geliefert.")
+        else:
+            print("Bitte eine gültige Menüoption eingeben.")
+
+
 def _menu(manager: ServerManager, store: ConfigStore) -> None:
     _ensure_setup(manager, store)
     while True:
@@ -273,6 +331,7 @@ def _menu(manager: ServerManager, store: ConfigStore) -> None:
             "  9) Backup erstellen (Server muss gestoppt sein)\n"
             " 10) IP-Adressen und Ports anzeigen\n"
             " 11) Grundeinstellungen / Standardports\n"
+            " 12) RCON-Spielertools (nur lokale Verbindung)\n"
             "  0) Beenden"
         )
         choice = input("Auswahl: ").strip()
@@ -316,6 +375,8 @@ def _menu(manager: ServerManager, store: ConfigStore) -> None:
                 _show_ip(manager)
             elif choice == "11":
                 _setup(manager)
+            elif choice == "12":
+                _rcon_menu(manager)
             else:
                 print("Bitte eine gültige Menüoption eingeben.")
         except (ManagerError, ConfigError, SystemdError, RuntimeErrorMCSC, MinecraftDownloadError, PropertiesError, ValueError, OSError) as exc:
@@ -352,6 +413,23 @@ def build_parser() -> argparse.ArgumentParser:
     ports.add_argument("--java", type=int, required=True, help="Java/TCP-Port")
     ports.add_argument("--bedrock", type=_optional_port_arg, default=_UNSET, help="Bedrock/UDP-Port oder off")
     ports.add_argument("--voice", type=_optional_port_arg, default=_UNSET, help="Voicechat/UDP-Port oder off")
+
+    rcon = sub.add_parser("rcon", help="Lokale RCON-Spielertools für online befindliche Spieler")
+    rcon_sub = rcon.add_subparsers(dest="rcon_action", required=True)
+    for action in ("enable", "disable", "players"):
+        rcon_action = rcon_sub.add_parser(action)
+        rcon_action.add_argument("server", help="Servername oder Profil-Slug")
+    for action in ("stats", "inventory"):
+        rcon_action = rcon_sub.add_parser(action)
+        rcon_action.add_argument("server", help="Servername oder Profil-Slug")
+        rcon_action.add_argument("player", help="Online-Java-Spielername")
+    set_item = rcon_sub.add_parser("set-item", help="Einen Live-Inventarplatz setzen (Minecraft 1.17+)")
+    set_item.add_argument("server", help="Servername oder Profil-Slug")
+    set_item.add_argument("player", help="Online-Java-Spielername")
+    set_item.add_argument("slot", type=int, help="Inventarplatz 0–35")
+    set_item.add_argument("item", help="Item-ID, zum Beispiel minecraft:diamond")
+    set_item.add_argument("count", type=int, nargs="?", default=1, help="Stückzahl 1–64")
+    set_item.add_argument("--yes", action="store_true", help="Inventaränderung ausdrücklich bestätigen (nichtinteraktiv erforderlich)")
 
     auto = sub.add_parser("autostart", help="Autostart nach Host-Neustart einstellen")
     auto.add_argument("server")
@@ -391,6 +469,31 @@ def main(argv: list[str] | None = None) -> int:
             manager.services.logs(manager.get_profile(args.server), follow=args.follow)
         elif args.command == "backup":
             print(f"Backup erstellt: {manager.backup(args.server)}")
+        elif args.command == "rcon":
+            if args.rcon_action == "enable":
+                manager.enable_rcon(args.server)
+                print("RCON ist für 127.0.0.1 eingerichtet. Passwort mit Dateirechten 0600 lokal gespeichert.")
+                print("Starte den Server, damit die RCON-Einstellungen übernommen werden.")
+            elif args.rcon_action == "disable":
+                manager.disable_rcon(args.server)
+                print("RCON wurde deaktiviert und das lokal gespeicherte Passwort entfernt.")
+            elif args.rcon_action == "players":
+                print(manager.rcon_players(args.server))
+            elif args.rcon_action == "stats":
+                print(manager.rcon_player_stats(args.server, args.player))
+            elif args.rcon_action == "inventory":
+                print(manager.rcon_inventory(args.server, args.player))
+            elif args.rcon_action == "set-item":
+                if not args.yes:
+                    if not sys.stdin.isatty():
+                        raise ManagerError("Nichtinteraktive Inventaränderungen benötigen die ausdrückliche Option --yes.")
+                    if not _yes_no(
+                        f"Inventarplatz {args.slot} von {args.player} mit {args.item} × {args.count} ersetzen?",
+                        default=False,
+                    ):
+                        print("Abgebrochen.")
+                        return 0
+                print(manager.rcon_set_inventory_item(args.server, args.player, args.slot, args.item, args.count))
         elif args.command == "ports":
             profile = manager.get_profile(args.server)
             bedrock = args.bedrock if args.bedrock is not _UNSET else profile.ports.bedrock_udp

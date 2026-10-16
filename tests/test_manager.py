@@ -1,11 +1,14 @@
+import os
+import stat
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from minecraft_server_creator.config import ConfigStore
 from minecraft_server_creator.manager import ManagerError, ServerManager
 from minecraft_server_creator.models import PortSettings
-from minecraft_server_creator.properties import read_properties
+from minecraft_server_creator.properties import read_properties, update_properties
 
 
 class FakeMetadata:
@@ -19,6 +22,29 @@ class FakeMetadata:
         target = Path(server_dir) / "server.jar"
         target.write_bytes(b"fake server jar")
         return {"id": version}, target
+
+
+class FakeServices:
+    def __init__(self, active=False):
+        self.active = active
+
+    def is_active(self, profile):
+        return self.active
+
+
+class FakeRcon:
+    def __init__(self):
+        self.commands = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        return None
+
+    def command(self, command):
+        self.commands.append(command)
+        return "ok"
 
 
 class ManagerTests(unittest.TestCase):
@@ -58,6 +84,94 @@ class ManagerTests(unittest.TestCase):
             with self.assertRaisesRegex(Exception, "noch nicht implementiert"):
                 manager.create_server("Forge world", server_type="forge")
             self.assertEqual(manager.load().profiles, [])
+
+    def test_rcon_is_local_only_and_secret_is_private(self):
+        with tempfile.TemporaryDirectory() as temp:
+            manager = ServerManager(
+                store=ConfigStore(Path(temp) / "config.json"),
+                metadata=FakeMetadata(),
+                services=FakeServices(),
+            )
+            manager.setup(Path(temp) / "servers", PortSettings())
+            profile = manager.create_server("RCON test")
+            with patch("minecraft_server_creator.manager.port_available", return_value=True):
+                manager.enable_rcon(profile.slug)
+            properties = read_properties(Path(profile.server_dir) / "server.properties")
+            secret_path = Path(profile.server_dir) / "config" / "rcon-password"
+            password = secret_path.read_text(encoding="utf-8").strip()
+            self.assertEqual(properties["enable-rcon"], "true")
+            self.assertEqual(properties["rcon.ip"], "127.0.0.1")
+            self.assertEqual(properties["rcon.port"], "25575")
+            self.assertEqual(properties["rcon.password"], password)
+            self.assertTrue(manager.rcon_is_enabled(profile.slug))
+            if os.name != "nt":
+                self.assertEqual(stat.S_IMODE(secret_path.stat().st_mode), 0o600)
+            with self.assertRaisesRegex(ManagerError, "dürfen nicht identisch sein"):
+                manager.update_ports(profile.slug, PortSettings(java_tcp=25575))
+            manager.disable_rcon(profile.slug)
+            self.assertFalse(manager.rcon_is_enabled(profile.slug))
+            self.assertFalse(secret_path.exists())
+
+    def test_rcon_setup_requires_stopped_server_and_nonconflicting_port(self):
+        with tempfile.TemporaryDirectory() as temp:
+            services = FakeServices(active=True)
+            manager = ServerManager(
+                store=ConfigStore(Path(temp) / "config.json"), metadata=FakeMetadata(), services=services
+            )
+            manager.setup(Path(temp) / "servers", PortSettings())
+            profile = manager.create_server("RCON active")
+            with self.assertRaisesRegex(ManagerError, "gestoppt"):
+                manager.enable_rcon(profile.slug)
+
+        with tempfile.TemporaryDirectory() as temp:
+            manager = ServerManager(
+                store=ConfigStore(Path(temp) / "config.json"), metadata=FakeMetadata(), services=FakeServices()
+            )
+            manager.setup(Path(temp) / "servers", PortSettings())
+            profile = manager.create_server("Port conflict", ports=PortSettings(java_tcp=25575))
+            with self.assertRaisesRegex(ManagerError, "belegt bereits"):
+                manager.enable_rcon(profile.slug)
+
+    def test_rcon_client_refuses_a_non_loopback_binding(self):
+        with tempfile.TemporaryDirectory() as temp:
+            services = FakeServices()
+            manager = ServerManager(
+                store=ConfigStore(Path(temp) / "config.json"), metadata=FakeMetadata(), services=services
+            )
+            manager.setup(Path(temp) / "servers", PortSettings())
+            profile = manager.create_server("RCON binding")
+            with patch("minecraft_server_creator.manager.port_available", return_value=True):
+                manager.enable_rcon(profile.slug)
+            update_properties(Path(profile.server_dir) / "server.properties", {"rcon.ip": "0.0.0.0"})
+            services.active = True
+            with self.assertRaisesRegex(ManagerError, "127.0.0.1"):
+                manager.rcon_players(profile.slug)
+
+    def test_inventory_edit_builds_a_constrained_live_player_command(self):
+        with tempfile.TemporaryDirectory() as temp:
+            manager = ServerManager(
+                store=ConfigStore(Path(temp) / "config.json"),
+                metadata=FakeMetadata(),
+                services=FakeServices(active=True),
+            )
+            manager.setup(Path(temp) / "servers", PortSettings())
+            profile = manager.create_server("Inventory")
+            fake_rcon = FakeRcon()
+            manager._rcon_client = lambda _: fake_rcon
+            self.assertEqual(manager.rcon_set_inventory_item(profile.slug, "Alex", 4, "diamond", 2), "ok")
+            self.assertEqual(
+                fake_rcon.commands,
+                ["item replace entity @a[name=Alex,limit=1] hotbar.4 with minecraft:diamond 2"],
+            )
+            manager.rcon_set_inventory_item(profile.slug, "Alex", 9, "diamond", 1)
+            self.assertEqual(
+                fake_rcon.commands[-1],
+                "item replace entity @a[name=Alex,limit=1] inventory.0 with minecraft:diamond 1",
+            )
+            with self.assertRaisesRegex(ManagerError, "Java-Spielernamen"):
+                manager.rcon_set_inventory_item(profile.slug, "Alex;op", 4, "diamond", 2)
+            with self.assertRaisesRegex(ManagerError, "Inventarplatz"):
+                manager.rcon_set_inventory_item(profile.slug, "Alex", 36, "diamond", 2)
 
 
 if __name__ == "__main__":

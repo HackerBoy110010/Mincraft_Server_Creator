@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ipaddress
+import re
 import socket
 import struct
 from dataclasses import dataclass
@@ -7,6 +9,47 @@ from dataclasses import dataclass
 
 class RconError(RuntimeError):
     pass
+
+
+DEFAULT_RCON_PORT = 25575
+_PLAYER_NAME = re.compile(r"[A-Za-z0-9_]{1,16}\Z")
+_ITEM_ID = re.compile(r"[a-z0-9_.-]+:[a-z0-9/._-]+\Z")
+
+
+def validate_player_name(name: str) -> str:
+    if not _PLAYER_NAME.fullmatch(name):
+        raise RconError("Java-Spielernamen dürfen nur 1–16 Buchstaben, Ziffern und Unterstriche enthalten.")
+    return name
+
+
+def normalize_item_id(item_id: str) -> str:
+    normalized = item_id.lower()
+    if ":" not in normalized:
+        normalized = f"minecraft:{normalized}"
+    if not _ITEM_ID.fullmatch(normalized):
+        raise RconError("Ungültige Item-ID; erlaubt sind IDs wie minecraft:diamond oder modname:item_name.")
+    return normalized
+
+
+def player_data_disabled_reason(server_type: str, minecraft_version: str) -> str | None:
+    if server_type != "vanilla":
+        return f"Spielerdaten über RCON wurden für {server_type} noch nicht auf Kompatibilität geprüft."
+    match = re.match(r"^(\d+)\.(\d+)(?:\.|$)", minecraft_version)
+    if not match:
+        return "Die Minecraft-Version konnte nicht geprüft werden; RCON-Spielerdaten bleiben vorsichtshalber deaktiviert."
+    if tuple(map(int, match.groups())) < (1, 13):
+        return "RCON-Spielerdaten benötigen Minecraft 1.13 oder neuer (data get)."
+    return None
+
+
+def inventory_editing_disabled_reason(server_type: str, minecraft_version: str) -> str | None:
+    reason = player_data_disabled_reason(server_type, minecraft_version)
+    if reason:
+        return reason
+    match = re.match(r"^(\d+)\.(\d+)(?:\.|$)", minecraft_version)
+    if match and tuple(map(int, match.groups())) < (1, 17):
+        return "Sichere Inventaränderungen über /item replace benötigen Minecraft 1.17 oder neuer."
+    return None
 
 
 @dataclass(frozen=True)
@@ -52,8 +95,19 @@ class RconClient:
     SERVERDATA_AUTH = 3
 
     def __init__(self, host: str, port: int, password: str, timeout: float = 3.0) -> None:
-        self.host = host
-        self.port = int(port)
+        try:
+            address = ipaddress.ip_address(host)
+            numeric_port = int(port)
+        except ValueError as exc:
+            raise RconError("RCON darf ausschließlich über eine numerische Loopback-IP angesprochen werden.") from exc
+        if not address.is_loopback:
+            raise RconError("Unsicherer RCON-Zielhost: nur Loopback-Adressen 127.0.0.1 oder ::1 sind zulässig.")
+        if not 1 <= numeric_port <= 65535:
+            raise RconError("Ungültiger RCON-Port.")
+        if not password or "\x00" in password:
+            raise RconError("Das RCON-Passwort darf nicht leer sein oder Nullbytes enthalten.")
+        self.host = str(address)
+        self.port = numeric_port
         self.password = password
         self.timeout = timeout
         self._socket: socket.socket | None = None

@@ -14,9 +14,11 @@ SSH-freundlicher Minecraft-Server-Manager mit einfachem Python-Textmenü. Das Re
 - Portkonfliktprüfung und Anzeige von LAN-/öffentlicher IP mit konfigurierten Endpunkten
 - geführte `server.properties`-Einstellungen für MOTD, Spielerlimit, Schwierigkeit, Spielmodus, PvP, Whitelist und Sichtweiten
 - manuelle Backups gestoppter Serverprofile
+- lokales RCON nur über `127.0.0.1`, mit Passwortdatei und restriktiven Rechten
+- Online-Spielerliste und Live-Spielerdaten; Inventar lesen sowie einzelne Plätze bei Vanilla 1.17+ ändern
 - Python-Quellinstallation und interaktives Terminalmenü
 
-**Noch nicht implementiert:** Fabric, Forge, NeoForge, Arclight, Mod-/Plugin-Downloads, automatische Firewallregeln und RCON-Spielerverwaltung. Diese sind als Ausbaustufen geplant; das Menü kennzeichnet noch nicht verfügbare Servertypen.
+**Noch nicht implementiert:** Fabric, Forge, NeoForge, Arclight, Mod-/Plugin-Downloads, automatische Firewallregeln und Backup-Wiederherstellung. RCON ist nur für Vanilla eingebunden und im echten Minecraft-Serverbetrieb noch nicht live getestet; Inventarzugriff betrifft ausschließlich online befindliche Spieler. Das Menü kennzeichnet noch nicht verfügbare Servertypen.
 
 ## Voraussetzungen
 
@@ -62,6 +64,15 @@ mcsc configure zuhause
 mcsc logs zuhause
 mcsc backup zuhause
 mcsc stop zuhause
+mcsc rcon enable zuhause
+mcsc start zuhause
+mcsc rcon players zuhause
+mcsc rcon stats zuhause Steve
+mcsc rcon inventory zuhause Steve
+# Beispiel: --yes bestätigt explizit; ändert nur einen ONLINE-Spieler
+mcsc rcon set-item zuhause Steve 0 minecraft:diamond 1 --yes
+mcsc stop zuhause
+mcsc rcon disable zuhause
 mcsc ip
 ```
 
@@ -79,7 +90,7 @@ Jedes Profil enthält eigene Serverdateien, `server.properties`, Logs, Mods-/Plu
 
 Das Programm zeigt lokale und öffentliche IP sowie konfigurierte TCP-/UDP-Endpunkte. Eine angezeigte öffentliche Adresse beweist nicht, dass Verbindungen von außen funktionieren: Routerweiterleitung, Provider-CGNAT, IPv6 und Firewallregeln können den Zugriff verhindern. Die optionale öffentliche IP-Abfrage verwendet einen externen IP-Echo-Dienst.
 
-Der RCON-Paketcodec ist vorhanden, aber eine sichere RCON-Verbindung sowie Spielerstatistiken und Live-Inventarbearbeitung sind noch nicht an die CLI angebunden. RCON darf später nicht zum Internet weitergeleitet werden; nicht unterstützte Kombinationen müssen die Inventarbearbeitung deaktivieren, ohne den Server zu sperren. Eine Backup-Wiederherstellung ist ebenfalls noch offen.
+RCON wird standardmäßig nicht aktiviert. `mcsc rcon enable <server>` muss bei gestopptem Server ausgeführt werden; es bindet RCON ausdrücklich an `127.0.0.1`, wählt den lokalen Standardport 25575 und speichert das erzeugte Passwort unter `config/rcon-password` mit Dateirechten `0600`. Die CLI bietet `players`, `stats`, `inventory` und (ab Vanilla 1.17) `set-item`. Beim `set-item` sind die Plätze 0–8 die Hotbar und 9–35 das Hauptinventar. Die Tools adressieren nur online befindliche Java-Spieler; Offline-Inventare werden nicht gelesen oder verändert. Inventaränderungen sind versions-/servertypgeprüft und schlagen geschlossen fehl, ohne den Serverbetrieb zu sperren. Der RCON-Port darf nicht über Router oder Firewall veröffentlicht werden. Diese Integration wurde mit simuliertem RCON-Verkehr getestet, aber noch nicht an einem echten Minecraft-Server.
 
 ## Tests
 
@@ -92,7 +103,7 @@ python -m unittest discover -s tests -v
 1. Vanilla-Grundlage, Profile, Ports, Java-Verwaltung und systemd (Umsetzung begonnen; Live-Serverbetrieb noch nicht verifiziert)
 2. Fabric, Forge, NeoForge und Arclight
 3. geprüfter Mod-/Plugin-Katalog über Modrinth und CurseForge
-4. sichere RCON-Verbindung, Spielerstatistiken, kompatible Live-Inventarverwaltung und Backup-Wiederherstellung
+4. RCON-/Inventar-Kompatibilität für weitere Servertypen und Versionen, Backup-Wiederherstellung sowie Live-Serverprüfung
 5. Linux-x64-/ARM64-Release-Pakete und Distributionstests; später Windows/macOS
 
 Projektplanung und Arbeitspakete sind in der Notion-Projektzentrale und im Linear-Projekt dokumentiert.
