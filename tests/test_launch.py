@@ -30,7 +30,7 @@ class LaunchTests(unittest.TestCase):
             launch_file = Path(temp) / profile.launch_target
             launch_file.parent.mkdir(parents=True)
             launch_file.write_text("-cp fake Main", encoding="utf-8")
-            self.assertEqual(validate_profile_launch(profile), launch_file)
+            self.assertEqual(validate_profile_launch(profile), launch_file.resolve())
             (Path(temp) / "user_jvm_args.txt").write_text("-Dexample=true", encoding="utf-8")
             self.assertEqual(
                 build_java_command(profile, "/managed/java"),
@@ -57,7 +57,7 @@ class LaunchTests(unittest.TestCase):
             )
             self.assertEqual(
                 build_java_command(profile, "/managed/java"),
-                ["/managed/java", "-Xms1024M", "-Xmx4096M", "-jar", str(jar), "nogui"],
+                ["/managed/java", "-Xms1024M", "-Xmx4096M", "-jar", str(jar.resolve()), "nogui"],
             )
 
     def test_fails_closed_if_args_file_is_missing_or_profile_metadata_is_mismatched(self):
