@@ -113,7 +113,7 @@ def _create(manager: ServerManager, args: argparse.Namespace) -> None:
         server_type = input("Servertyp [vanilla]: ").strip().lower() or "vanilla"
     server_type = server_type or "vanilla"
     if server_type not in IMPLEMENTED_SERVER_TYPES:
-        raise ManagerError(f"{server_type} ist noch nicht verfügbar; aktuell kann nur Vanilla installiert werden.")
+        raise ManagerError(f"{server_type} ist noch nicht verfügbar; momentan können Vanilla und Fabric installiert werden.")
     version = args.version
     if version is None:
         if interactive:
@@ -138,7 +138,7 @@ def _create(manager: ServerManager, args: argparse.Namespace) -> None:
         if interactive else defaults.voice_udp
     )
     ports = PortSettings(java_tcp=java_port, bedrock_udp=bedrock_port, voice_udp=voice_port)
-    if not _yes_no(f"Vanilla-Server '{name}' wird geladen. Fortfahren?", default=True):
+    if not _yes_no(f"{server_type.capitalize()}-Server '{name}' wird geladen. Fortfahren?", default=True):
         print("Abgebrochen.")
         return
     profile = manager.create_server(
@@ -321,7 +321,7 @@ def _menu(manager: ServerManager, store: ConfigStore) -> None:
         print(
             "\nMinecraft Server Creator\n"
             "  1) Server anzeigen\n"
-            "  2) Vanilla-Server anlegen\n"
+            "  2) Server anlegen (Vanilla/Fabric)\n"
             "  3) Server starten\n"
             "  4) Server stoppen\n"
             "  5) Geführte Servereinstellungen ändern\n"
@@ -394,7 +394,7 @@ def build_parser() -> argparse.ArgumentParser:
     configure.add_argument("server", help="Servername oder Profil-Slug")
     create = sub.add_parser("create", help="Minecraft-Serverprofil anlegen")
     create.add_argument("name", nargs="?", help="Anzeigename des Servers")
-    create.add_argument("--type", choices=SERVER_TYPES, default=None, help="Servertyp (derzeit Vanilla verfügbar)")
+    create.add_argument("--type", choices=SERVER_TYPES, default=None, help="Servertyp (derzeit Vanilla und Fabric verfügbar)")
     create.add_argument("--version", default=None, help="Minecraft-Version oder 'latest'")
     create.add_argument("--memory-mb", type=int, default=None, help="Maximaler Arbeitsspeicher in MB")
     create.add_argument("--java-port", type=int, default=None, help="Java-Port/TCP")

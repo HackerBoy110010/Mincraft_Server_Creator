@@ -6,7 +6,7 @@ SSH-freundlicher Minecraft-Server-Manager mit einfachem Python-Textmenü. Das Re
 
 - lokale Konfiguration und getrennte Serverprofile
 - Erstkonfiguration mit Serverordner und globalen Port-Standardwerten; Werte lassen sich pro Profil überschreiben
-- Installation eines Vanilla-Java-Servers aus den offiziellen Mojang-Versionsmetadaten
+- Installation von Vanilla- und Fabric-Java-Servern; Vanilla kommt aus Mojang-Metadaten, Fabric über die offizielle Fabric-Meta-API
 - neueste stabile Version als Vorgabe; konkrete veröffentlichte Versionen können angegeben werden
 - passende Java-Laufzeit über Adoptium/Temurin verwalten und SHA-256 vor dem Entpacken prüfen
 - EULA-Zustimmung ausdrücklich vor dem ersten Start
@@ -18,7 +18,7 @@ SSH-freundlicher Minecraft-Server-Manager mit einfachem Python-Textmenü. Das Re
 - Online-Spielerliste und Live-Spielerdaten; Inventar lesen sowie einzelne Plätze bei Vanilla 1.17+ ändern
 - Python-Quellinstallation und interaktives Terminalmenü
 
-**Noch nicht implementiert:** Fabric, Forge, NeoForge, Arclight, Mod-/Plugin-Downloads, automatische Firewallregeln und Backup-Wiederherstellung. RCON ist nur für Vanilla eingebunden und im echten Minecraft-Serverbetrieb noch nicht live getestet; Inventarzugriff betrifft ausschließlich online befindliche Spieler. Das Menü kennzeichnet noch nicht verfügbare Servertypen.
+**Noch nicht implementiert:** Forge, NeoForge, Arclight, Mod-/Plugin-Downloads, automatische Firewallregeln und Backup-Wiederherstellung. RCON ist nur für Vanilla eingebunden und im echten Minecraft-Serverbetrieb noch nicht live getestet; Inventarzugriff betrifft ausschließlich online befindliche Spieler. Der Fabric-Launcher wird aus offiziellen Metadaten geladen, aber noch nicht mit einem echten Serverstart verifiziert. Das Menü kennzeichnet noch nicht verfügbare Servertypen.
 
 ## Voraussetzungen
 
@@ -101,7 +101,7 @@ python -m unittest discover -s tests -v
 ## Geplante Ausbaustufen
 
 1. Vanilla-Grundlage, Profile, Ports, Java-Verwaltung und systemd (Umsetzung begonnen; Live-Serverbetrieb noch nicht verifiziert)
-2. Fabric, Forge, NeoForge und Arclight
+2. Forge, NeoForge und Arclight (Fabric-Grundlage ergänzt; Live-Startprüfung offen)
 3. geprüfter Mod-/Plugin-Katalog über Modrinth und CurseForge
 4. RCON-/Inventar-Kompatibilität für weitere Servertypen und Versionen, Backup-Wiederherstellung sowie Live-Serverprüfung
 5. Linux-x64-/ARM64-Release-Pakete und Distributionstests; später Windows/macOS

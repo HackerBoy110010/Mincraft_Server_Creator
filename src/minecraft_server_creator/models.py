@@ -7,7 +7,7 @@ import unicodedata
 from typing import Any
 
 SERVER_TYPES = ("vanilla", "fabric", "forge", "neoforge", "arclight")
-IMPLEMENTED_SERVER_TYPES = frozenset({"vanilla"})
+IMPLEMENTED_SERVER_TYPES = frozenset({"vanilla", "fabric"})
 
 
 class ValidationError(ValueError):

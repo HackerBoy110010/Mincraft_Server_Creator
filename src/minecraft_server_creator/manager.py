@@ -13,6 +13,7 @@ from typing import Callable
 
 from .config import AppConfig, ConfigStore, data_directory
 from .minecraft import MinecraftMetadataClient
+from .loaders import FabricInstaller
 from .models import IMPLEMENTED_SERVER_TYPES, PortSettings, ServerProfile, slugify, validate_port
 from .network import port_available
 from .properties import read_properties, update_properties
@@ -40,11 +41,13 @@ class ServerManager:
         metadata: MinecraftMetadataClient | None = None,
         runtimes: RuntimeManager | None = None,
         services: SystemdUserService | None = None,
+        fabric: FabricInstaller | None = None,
     ) -> None:
         self.store = store or ConfigStore()
         self.metadata = metadata or MinecraftMetadataClient()
         self.runtimes = runtimes or RuntimeManager(data_directory())
         self.services = services or SystemdUserService()
+        self.fabric = fabric or FabricInstaller()
 
     def load(self) -> AppConfig:
         return self.store.load()
@@ -75,7 +78,7 @@ class ServerManager:
         if server_type not in IMPLEMENTED_SERVER_TYPES:
             raise ManagerError(
                 f"{server_type} ist bereits in der Planung, aber noch nicht implementiert. "
-                "Aktuell kann nur Vanilla installiert werden."
+                "Aktuell sind Vanilla und Fabric verfügbar."
             )
         if not name.strip():
             raise ManagerError("Der Servername darf nicht leer sein.")
@@ -102,7 +105,10 @@ class ServerManager:
         try:
             for child in ("logs", "mods", "plugins", "backups", "config"):
                 (temp_dir / child).mkdir(mode=0o700, parents=True, exist_ok=True)
-            self.metadata.install_vanilla(minecraft_version, temp_dir)
+            if server_type == "vanilla":
+                self.metadata.install_vanilla(minecraft_version, temp_dir)
+            elif server_type == "fabric":
+                self.fabric.install(minecraft_version, version_info, temp_dir)
             (temp_dir / "eula.txt").write_text("eula=false\n", encoding="utf-8")
             update_properties(
                 temp_dir / "server.properties",

@@ -24,6 +24,13 @@ class FakeMetadata:
         return {"id": version}, target
 
 
+class FakeFabric:
+    def install(self, version, version_info, server_dir):
+        target = Path(server_dir) / "server.jar"
+        target.write_bytes(b"fake Fabric server jar")
+        return target
+
+
 class FakeServices:
     def __init__(self, active=False):
         self.active = active
@@ -59,6 +66,17 @@ class ManagerTests(unittest.TestCase):
             self.assertEqual((Path(profile.server_dir) / "eula.txt").read_text(encoding="utf-8"), "eula=false\n")
             self.assertIn("server-port=25572", (Path(profile.server_dir) / "server.properties").read_text(encoding="utf-8"))
             self.assertIsNone(manager.get_profile("home-friends").ports.bedrock_udp)
+
+    def test_create_fabric_profile_uses_the_loader_installer(self):
+        with tempfile.TemporaryDirectory() as temp:
+            fabric = FakeFabric()
+            manager = ServerManager(
+                store=ConfigStore(Path(temp) / "config.json"), metadata=FakeMetadata(), fabric=fabric
+            )
+            manager.setup(Path(temp) / "servers", PortSettings())
+            profile = manager.create_server("Fabric world", server_type="fabric")
+            self.assertEqual(profile.server_type, "fabric")
+            self.assertEqual((Path(profile.server_dir) / "server.jar").read_bytes(), b"fake Fabric server jar")
 
     def test_guided_settings_validate_and_update_properties(self):
         with tempfile.TemporaryDirectory() as temp:
