@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+.coverage
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local Minecraft worlds, runtime downloads, and secrets
+.minecraft-server-creator/
+MinecraftServers/
+*.rcon
+*.secret

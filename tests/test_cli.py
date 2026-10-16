@@ -1,0 +1,29 @@
+import unittest
+
+from minecraft_server_creator.cli import build_parser
+
+
+class CliParserTests(unittest.TestCase):
+    def test_create_arguments(self):
+        parser = build_parser()
+        args = parser.parse_args(["create", "my world", "--type", "vanilla", "--version", "latest", "--java-port", "25570"])
+        self.assertEqual(args.command, "create")
+        self.assertEqual(args.name, "my world")
+        self.assertEqual(args.java_port, 25570)
+
+    def test_optional_port_can_be_disabled_explicitly(self):
+        parser = build_parser()
+        args = parser.parse_args(["create", "my-world", "--bedrock-port", "off"])
+        self.assertIsNone(args.bedrock_port)
+
+    def test_help_parser_has_expected_commands(self):
+        parser = build_parser()
+        choices = parser._subparsers._group_actions[0].choices
+        self.assertIn("create", choices)
+        self.assertIn("configure", choices)
+        self.assertIn("start", choices)
+        self.assertIn("autostart", choices)
+
+
+if __name__ == "__main__":
+    unittest.main()
