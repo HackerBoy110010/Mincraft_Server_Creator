@@ -45,23 +45,24 @@ mcsc
 
 Für die Quellinstallation unter Windows wird die virtuelle Umgebung über `.venv\\Scripts\\activate` aktiviert. Die Hintergrunddienst-Integration ist derzeit Linux/systemd-spezifisch.
 
-## Beta testen (Linux)
+## Beta direkt über SSH testen (Linux)
 
-Der `tests`-Workflow baut nach jedem Push ein plattformunabhängiges Python-Wheel und ein Source-Archiv. Nach erfolgreichem Workflow findest du das 30 Tage verfügbare Artefakt `mcsc-python-package-<commit>` unter [GitHub Actions](https://github.com/HackerBoy110010/Mincraft_Server_Creator/actions). Das Wheel ist kein eigenständiges Binary: Zum Installieren ist Python 3.11+ nötig; zum Betreiben der Server Linux mit systemd.
-
-Nach dem Herunterladen und Entpacken des Artefakts das Wheel in einer virtuellen Umgebung installieren:
+Du musst dafür kein Paket auf deinen PC laden oder von dort übertragen: Führe die Installation direkt in der SSH-Sitzung **auf dem Linux-Server** aus. Sie lädt den aktuellen Beta-Branch von GitHub in eine Python-Umgebung unter deinem Benutzerkonto. Benötigt werden Python 3.11+, Git und Linux mit systemd.
 
 ```bash
-python3 -m venv .venv
-. .venv/bin/activate
-python -m pip install ./minecraft_server_creator-0.1.0-py3-none-any.whl
+python3 -m venv "$HOME/.venvs/mcsc-beta"
+source "$HOME/.venvs/mcsc-beta/bin/activate"
+python -m pip install --upgrade --force-reinstall \
+  "git+https://github.com/HackerBoy110010/Mincraft_Server_Creator.git@arena/461d7229-mincraft-server-creator"
 mcsc --help
 mcsc setup
 mcsc create mcsc-test --type vanilla --version latest
 mcsc start mcsc-test
 ```
 
-Für den ersten Test bitte ein neues Testprofil verwenden, die angezeigte EULA ausdrücklich beantworten und beim Start die Lingering-Abfrage bestätigen, falls sie erscheint. Zum Prüfen des Hintergrundbetriebs nach dem Start die SSH-Verbindung trennen, neu verbinden und `mcsc status` sowie danach `mcsc stop mcsc-test` ausführen. Das Paket wird bei einem veröffentlichten GitHub-Release zusätzlich automatisch als Wheel und Source-Archiv an die Release-Seite angehängt.
+Für den ersten Test bitte ein neues Testprofil verwenden, die angezeigte EULA ausdrücklich beantworten und beim Start die Lingering-Abfrage bestätigen, falls sie erscheint. Zum Prüfen des Hintergrundbetriebs nach dem Start die SSH-Verbindung trennen, neu verbinden und `mcsc status` sowie danach `mcsc stop mcsc-test` ausführen. Für Updates denselben `pip install --upgrade --force-reinstall ...`-Befehl erneut starten; dabei wird der Branch-Stand direkt von GitHub geholt.
+
+Alternativ baut der `tests`-Workflow ein plattformunabhängiges Python-Wheel und Source-Archiv, die 30 Tage als [GitHub-Actions-Artefakt](https://github.com/HackerBoy110010/Mincraft_Server_Creator/actions) verfügbar sind. Das Wheel ist kein eigenständiges Binary. Bei einem veröffentlichten GitHub-Release werden Wheel und Source-Archiv automatisch an die Release-Seite angehängt.
 
 ## Erststart und Ports
 
