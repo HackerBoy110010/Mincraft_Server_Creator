@@ -45,6 +45,24 @@ mcsc
 
 Für die Quellinstallation unter Windows wird die virtuelle Umgebung über `.venv\\Scripts\\activate` aktiviert. Die Hintergrunddienst-Integration ist derzeit Linux/systemd-spezifisch.
 
+## Beta testen (Linux)
+
+Der `tests`-Workflow baut nach jedem Push ein plattformunabhängiges Python-Wheel und ein Source-Archiv. Nach erfolgreichem Workflow findest du das 30 Tage verfügbare Artefakt `mcsc-python-package-<commit>` unter [GitHub Actions](https://github.com/HackerBoy110010/Mincraft_Server_Creator/actions). Das Wheel ist kein eigenständiges Binary: Zum Installieren ist Python 3.11+ nötig; zum Betreiben der Server Linux mit systemd.
+
+Nach dem Herunterladen und Entpacken des Artefakts das Wheel in einer virtuellen Umgebung installieren:
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install ./minecraft_server_creator-0.1.0-py3-none-any.whl
+mcsc --help
+mcsc setup
+mcsc create mcsc-test --type vanilla --version latest
+mcsc start mcsc-test
+```
+
+Für den ersten Test bitte ein neues Testprofil verwenden, die angezeigte EULA ausdrücklich beantworten und beim Start die Lingering-Abfrage bestätigen, falls sie erscheint. Zum Prüfen des Hintergrundbetriebs nach dem Start die SSH-Verbindung trennen, neu verbinden und `mcsc status` sowie danach `mcsc stop mcsc-test` ausführen. Das Paket wird bei einem veröffentlichten GitHub-Release zusätzlich automatisch als Wheel und Source-Archiv an die Release-Seite angehängt.
+
 ## Erststart und Ports
 
 `mcsc` öffnet das Textmenü. Beim ersten Lauf fragt `mcsc setup` nach dem Speicherordner und globalen Port-Standardwerten:
