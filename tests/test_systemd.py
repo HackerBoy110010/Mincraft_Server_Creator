@@ -10,7 +10,7 @@ from minecraft_server_creator.systemd import SystemdUserService
 class SystemdUnitTests(unittest.TestCase):
     def test_forge_unit_uses_generated_argument_file(self):
         with tempfile.TemporaryDirectory() as temp:
-            server_dir = Path(temp) / "server"
+            server_dir = Path(temp) / "server with spaces"
             launch_target = "libraries/net/minecraftforge/forge/1.21.4-54.1.0/unix_args.txt"
             launch_file = server_dir / launch_target
             launch_file.parent.mkdir(parents=True)
@@ -32,6 +32,8 @@ class SystemdUnitTests(unittest.TestCase):
                 with patch.object(service, "_run") as run:
                     service.install_unit(profile, "/managed/java")
             unit = service.unit_path(profile).read_text(encoding="utf-8")
+            self.assertIn(f"WorkingDirectory={server_dir.resolve()}", unit)
+            self.assertNotIn(f'WorkingDirectory="{server_dir.resolve()}"', unit)
             exec_start = next(line for line in unit.splitlines() if line.startswith("ExecStart="))
             self.assertIn('"/managed/java"', exec_start)
             self.assertIn('"@' + launch_target + '"', exec_start)

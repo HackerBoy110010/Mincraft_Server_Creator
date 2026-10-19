@@ -23,6 +23,13 @@ def _quote_systemd(value: str | Path) -> str:
     return f'"{text}"'
 
 
+def _systemd_path(value: str | Path) -> str:
+    text = str(value)
+    if "\n" in text or "\r" in text:
+        raise SystemdError("Pfade für systemd dürfen keine Zeilenumbrüche enthalten.")
+    return text.replace("%", "%%")
+
+
 class SystemdUserService:
     """Manage one systemd --user unit per profile on Linux hosts."""
 
@@ -70,7 +77,7 @@ class SystemdUserService:
                 "",
                 "[Service]",
                 "Type=simple",
-                f"WorkingDirectory={_quote_systemd(server_dir)}",
+                f"WorkingDirectory={_systemd_path(server_dir)}",
                 f"ExecStart={exec_start}",
                 "KillSignal=SIGINT",
                 "TimeoutStopSec=90",
