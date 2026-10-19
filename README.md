@@ -34,9 +34,13 @@ Die Python-Codebasis verwendet keine Ubuntu-spezifische Java-Paketinstallation. 
 
 ## Installation aus dem Repository
 
+Das Repository ist privat. Für den Beta-Test direkt auf einem Linux-Server brauchst du deshalb einen GitHub-Zugang für den Server; ein GitHub-Kontopasswort funktioniert nicht für Git-HTTPS. Empfohlen ist ein schreibgeschützter Deploy Key (siehe Beta-Anleitung unten).
+
+Mit einem bereits bei GitHub hinterlegten SSH-Schlüssel kannst du den Beta-Branch direkt klonen:
+
 ```bash
-git clone https://github.com/HackerBoy110010/Mincraft_Server_Creator.git
-cd Mincraft_Server_Creator
+git clone --branch arena/461d7229-mincraft-server-creator git@github.com:HackerBoy110010/Mincraft_Server_Creator.git mcsc-beta
+cd mcsc-beta
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install -e .
@@ -47,22 +51,36 @@ Für die Quellinstallation unter Windows wird die virtuelle Umgebung über `.ven
 
 ## Beta direkt über SSH testen (Linux)
 
-Du musst dafür kein Paket auf deinen PC laden oder von dort übertragen: Führe die Installation direkt in der SSH-Sitzung **auf dem Linux-Server** aus. Sie lädt den aktuellen Beta-Branch von GitHub in eine Python-Umgebung unter deinem Benutzerkonto. Benötigt werden Python 3.11+, Git und Linux mit systemd.
+Du musst kein Paket auf deinen PC laden oder übertragen. Der Server lädt den aktuellen Beta-Branch direkt von GitHub. Benötigt werden Python 3.11+, Git, OpenSSH und Linux mit systemd.
+
+Da das Repository privat ist, richte einmalig einen **schreibgeschützten Deploy Key** ein. Erzeuge das Schlüsselpaar direkt auf dem Linux-Server:
+
+```bash
+mkdir -p "$HOME/.ssh"
+chmod 700 "$HOME/.ssh"
+ssh-keygen -t ed25519 -C "mcsc read-only deploy key" -f "$HOME/.ssh/mcsc_github_ro" -N ""
+cat "$HOME/.ssh/mcsc_github_ro.pub"
+```
+
+Füge den ausgegebenen **öffentlichen** Schlüssel im GitHub-Repository unter **Settings → Deploy keys → Add deploy key** hinzu. Lasse Schreibzugriff ausgeschaltet. Den privaten Schlüssel `~/.ssh/mcsc_github_ro` niemals weitergeben.
+
+Danach in der SSH-Sitzung installieren:
 
 ```bash
 python3 -m venv "$HOME/.venvs/mcsc-beta"
 source "$HOME/.venvs/mcsc-beta/bin/activate"
-python -m pip install --upgrade --force-reinstall \
-  "git+https://github.com/HackerBoy110010/Mincraft_Server_Creator.git@arena/461d7229-mincraft-server-creator"
+GIT_SSH_COMMAND="ssh -i $HOME/.ssh/mcsc_github_ro -o IdentitiesOnly=yes" \
+  python -m pip install --upgrade --force-reinstall \
+  "git+ssh://git@github.com/HackerBoy110010/Mincraft_Server_Creator.git@arena/461d7229-mincraft-server-creator"
 mcsc --help
 mcsc setup
 mcsc create mcsc-test --type vanilla --version latest
 mcsc start mcsc-test
 ```
 
-Für den ersten Test bitte ein neues Testprofil verwenden, die angezeigte EULA ausdrücklich beantworten und beim Start die Lingering-Abfrage bestätigen, falls sie erscheint. Zum Prüfen des Hintergrundbetriebs nach dem Start die SSH-Verbindung trennen, neu verbinden und `mcsc status` sowie danach `mcsc stop mcsc-test` ausführen. Für Updates denselben `pip install --upgrade --force-reinstall ...`-Befehl erneut starten; dabei wird der Branch-Stand direkt von GitHub geholt.
+Für den ersten Test bitte ein neues Testprofil verwenden, die angezeigte EULA ausdrücklich beantworten und beim Start die Lingering-Abfrage bestätigen, falls sie erscheint. Zum Prüfen des Hintergrundbetriebs nach dem Start die SSH-Verbindung trennen, neu verbinden und `mcsc status` sowie danach `mcsc stop mcsc-test` ausführen. Für Updates denselben `GIT_SSH_COMMAND=... pip install --upgrade --force-reinstall ...`-Befehl erneut starten; dabei wird der Branch-Stand direkt von GitHub geholt.
 
-Alternativ baut der `tests`-Workflow ein plattformunabhängiges Python-Wheel und Source-Archiv, die 30 Tage als [GitHub-Actions-Artefakt](https://github.com/HackerBoy110010/Mincraft_Server_Creator/actions) verfügbar sind. Das Wheel ist kein eigenständiges Binary. Bei einem veröffentlichten GitHub-Release werden Wheel und Source-Archiv automatisch an die Release-Seite angehängt.
+Der CI-Workflow baut außerdem ein plattformunabhängiges Python-Wheel und Source-Archiv. Diese GitHub-Artefakte sowie Release-Downloads sind bei diesem privaten Repository nur mit GitHub-Zugang abrufbar. Das Wheel ist kein eigenständiges Binary.
 
 ## Erststart und Ports
 
