@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import os
+import re
 import secrets
 import shutil
 import stat
@@ -10,6 +11,7 @@ from pathlib import Path
 import tempfile
 import uuid
 from typing import Callable
+from urllib.parse import urlsplit
 
 from .config import AppConfig, ConfigStore, data_directory
 from .geyser import GeyserInstallPlan, GeyserInstallResult, GeyserInstaller
@@ -353,6 +355,68 @@ class ServerManager:
                 normalized[key] = number
         update_properties(Path(profile.server_dir) / "server.properties", normalized)
         return profile
+
+    def configure_resource_pack(
+        self,
+        selector: str,
+        *,
+        url: str,
+        sha1: str,
+        required: bool,
+    ) -> Path:
+        profile = self.get_profile(selector)
+        if self.services.is_active(profile):
+            raise ManagerError("Stoppe den Server vor der Konfiguration des Ressourcenpakets.")
+
+        resource_url = url.strip()
+        if not resource_url or any(ord(char) < 32 or ord(char) == 127 for char in resource_url):
+            raise ManagerError("Die Ressourcenpaket-URL ist leer oder enthält Steuerzeichen.")
+        try:
+            parsed_url = urlsplit(resource_url)
+            parsed_url.port  # Validate an explicitly supplied port.
+        except ValueError as exc:
+            raise ManagerError("Die Ressourcenpaket-URL enthält einen ungültigen Port.") from exc
+        if (
+            parsed_url.scheme.lower() != "https"
+            or not parsed_url.hostname
+            or parsed_url.username is not None
+            or parsed_url.password is not None
+            or parsed_url.fragment
+        ):
+            raise ManagerError("Das Ressourcenpaket benötigt eine HTTPS-URL ohne Zugangsdaten oder Fragment.")
+        normalized_sha1 = sha1.strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{40}", normalized_sha1):
+            raise ManagerError("Der SHA-1-Hash des Ressourcenpakets muss aus genau 40 Hexadezimalzeichen bestehen.")
+        if not isinstance(required, bool):
+            raise ManagerError("Die Ressourcenpaket-Pflicht muss ausdrücklich true oder false sein.")
+
+        server_dir = Path(profile.server_dir).expanduser()
+        if server_dir.is_symlink():
+            raise ManagerError("Der Serverordner darf für die Ressourcenpaket-Konfiguration kein symbolischer Link sein.")
+        try:
+            root = server_dir.resolve(strict=True)
+            configured_root = Path(self.load().servers_root).expanduser().resolve(strict=True)
+        except OSError as exc:
+            raise ManagerError(f"Der Server- oder Profilordner kann nicht sicher aufgelöst werden: {exc}") from exc
+        if not root.is_dir() or root.parent != configured_root:
+            raise ManagerError("Der Serverordner liegt nicht direkt innerhalb des konfigurierten Profilordners.")
+        properties_path = root / "server.properties"
+        if properties_path.is_symlink():
+            raise ManagerError("server.properties darf für die Ressourcenpaket-Konfiguration kein symbolischer Link sein.")
+        if properties_path.exists() and not properties_path.is_file():
+            raise ManagerError("server.properties ist keine reguläre Datei.")
+        if properties_path.exists() and properties_path.resolve().parent != root:
+            raise ManagerError("server.properties liegt nicht sicher innerhalb des Serverprofils.")
+
+        update_properties(
+            properties_path,
+            {
+                "resource-pack": resource_url,
+                "resource-pack-sha1": normalized_sha1,
+                "require-resource-pack": str(required).lower(),
+            },
+        )
+        return properties_path
 
     @staticmethod
     def _rcon_secret_path(profile: ServerProfile) -> Path:

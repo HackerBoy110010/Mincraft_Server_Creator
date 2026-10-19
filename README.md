@@ -20,6 +20,8 @@ SSH-freundlicher Minecraft-Server-Manager mit einfachem Python-Textmenü. Das Re
 - lokales RCON nur über `127.0.0.1`, mit Passwortdatei und restriktiven Rechten
 - Online-Spielerliste und Live-Spielerdaten; Inventar lesen sowie einzelne Plätze bei Vanilla 1.17+ ändern
 - Mod-/Plugin-/Datapack-Suche und Installation aus Modrinth und CurseForge mit Minecraft-Version-/Loaderfiltern, Prüfsummen und getrennten Zielordnern; Datapacks landen in `<level-name>/datapacks/` (Standardwelt `world`)
+- Modrinth-Installationen können auf eine konkrete Versions-ID gepinnt werden; Beta-Dateien benötigen das ausdrückliche CLI-Opt-in `--allow-beta`
+- HTTPS-Server-Ressourcenpakete mit validiertem SHA-1-Format konfigurieren und optional für alle beitretenden Spieler verpflichtend machen
 - Geyser-Fabric-Installation für reine Fabric-Profile auf der neuesten stabilen Minecraft-Version; passende stabile Fabric API wird automatisch ergänzt, Beta-Geyser nur nach ausdrücklichem Opt-in (`--allow-beta`)
 - Geyser-NetherNet-Konfiguration für den Profilport nach dem ersten Serverstart; die Portnummer gilt dabei für TCP und UDP
 - Python-Quellinstallation und interaktives Terminalmenü
@@ -160,7 +162,15 @@ RCON wird standardmäßig nicht aktiviert. `mcsc rcon enable <server>` muss bei 
 
 `catalog install` wählt standardmäßig die neueste stabile passende JAR-Datei bzw. für Datapacks eine ZIP-Datei. Vor dem Download wird interaktiv um Bestätigung gebeten (nichtinteraktive Aufrufe benötigen `--yes`); verfügbare SHA-1/SHA-512/MD5-Prüfsummen werden geprüft und vorhandene Dateien nicht überschrieben. Datapack-ZIPs müssen `pack.mcmeta` mit einem erkennbaren Format-Eintrag direkt im ZIP-Stammverzeichnis enthalten. Der Server muss während der Installation gestoppt sein. Ein Datapack wird nicht automatisch aktiviert: nach dem Start `/datapack list available` prüfen und, falls nötig, `/datapack enable file/<Dateiname>` ausführen. Installationsdaten werden in `config/catalog-installed.json` vermerkt; `mcsc catalog list <server>` zeigt sie an.
 
-Modrinth ist ohne Schlüssel nutzbar. CurseForge verlangt einen offiziellen API-Schlüssel als Umgebungsvariable `CURSEFORGE_API_KEY`; der Schlüssel wird ausschließlich im Request-Header verwendet und nicht gespeichert. Die CurseForge-Data-Packs-Kategorie wird dynamisch über die Kategorien-API aufgelöst, eine Kategorie-ID ist nicht fest im Programm hinterlegt. Die CurseForge-API bietet keinen verlässlichen Server-/Client-Filter für Mods, daher sind Herstellerangaben zu prüfen. Erforderliche Projektabhängigkeiten werden angezeigt, aber nicht automatisch installiert. Bei Plugins sind ebenfalls die Herstellerangaben zur Kompatibilität zu prüfen; Paper-only-Dateien werden nicht als Bukkit-/Spigot-kompatibel vorausgesetzt.
+Bei Modrinth kann `--version-id <ID>` eine konkrete kompatible Version festpinnen; `--allow-beta` ist ein separates, ausdrücklich zu setzendes Opt-in für Beta-Dateien. Beide Optionen sind nur für Modrinth verfügbar. CurseForge verlangt einen offiziellen API-Schlüssel als Umgebungsvariable `CURSEFORGE_API_KEY`; der Schlüssel wird ausschließlich im Request-Header verwendet und nicht gespeichert. Die CurseForge-Data-Packs-Kategorie wird dynamisch über die Kategorien-API aufgelöst, eine Kategorie-ID ist nicht fest im Programm hinterlegt. Die CurseForge-API bietet keinen verlässlichen Server-/Client-Filter für Mods, daher sind Herstellerangaben zu prüfen. Erforderliche Projektabhängigkeiten werden angezeigt, aber nicht automatisch installiert. Bei Plugins sind ebenfalls die Herstellerangaben zur Kompatibilität zu prüfen; Paper-only-Dateien werden nicht als Bukkit-/Spigot-kompatibel vorausgesetzt.
+
+Ein erzwungenes Server-Ressourcenpaket lässt sich bei gestopptem Server mit einer direkten HTTPS-Datei-URL und dem dazugehörigen SHA-1-Hash setzen:
+
+```bash
+mcsc resource-pack set zuhause --url "https://example.org/pack.zip" --sha1 SHA1_HIER_EINSETZEN --required
+```
+
+`--required` veranlasst Minecraft, Spieler, die das Pack ablehnen, vom Server zu trennen; mit `--optional` bleibt es freiwillig. MCSC speichert nur URL, SHA-1 und Pflichtstatus in `server.properties`; die Datei wird nicht auf den Server gespiegelt. Die URL muss daher direkt auf die ZIP-Datei zeigen. MCSC prüft HTTPS und die SHA-1-Schreibweise, lädt das Pack aber nicht herunter; verwende deshalb den Hash, der vom gleichen Datei-Release veröffentlicht wurde.
 
 ## Geyser-Fabric für Minecraft 26.3
 

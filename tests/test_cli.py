@@ -25,6 +25,23 @@ class CliParserTests(unittest.TestCase):
         self.assertEqual(catalog_search.catalog_action, "search")
         self.assertEqual(catalog_search.source, "modrinth")
         self.assertEqual(catalog_search.kind, "mod")
+        catalog_install = parser.parse_args(
+            [
+                "catalog", "install", "home", "project-id", "--source", "modrinth", "--kind", "mod",
+                "--version-id", "version-id", "--allow-beta",
+            ]
+        )
+        self.assertEqual(catalog_install.version_id, "version-id")
+        self.assertTrue(catalog_install.allow_beta)
+        forced_pack = parser.parse_args(
+            [
+                "resource-pack", "set", "home", "--url", "https://cdn.modrinth.com/pack.zip",
+                "--sha1", "a" * 40, "--required",
+            ]
+        )
+        self.assertEqual(forced_pack.command, "resource-pack")
+        self.assertEqual(forced_pack.resource_pack_action, "set")
+        self.assertTrue(forced_pack.required)
         datapack_search = parser.parse_args(
             ["catalog", "search", "home", "terrain", "--source", "curseforge", "--kind", "datapack"]
         )
@@ -117,6 +134,7 @@ class CliParserTests(unittest.TestCase):
         self.assertIn("configure", choices)
         self.assertIn("rcon", choices)
         self.assertIn("catalog", choices)
+        self.assertIn("resource-pack", choices)
         self.assertIn("geyser", choices)
         self.assertIn("world", choices)
         self.assertIn("start", choices)

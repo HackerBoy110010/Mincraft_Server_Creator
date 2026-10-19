@@ -463,6 +463,48 @@ class ContentCatalogTests(unittest.TestCase):
             download.assert_not_called()
 
 
+    def test_modrinth_version_id_pins_to_the_requested_compatible_release(self):
+        project = {"id": "abc123", "slug": "example-mod", "title": "Example Mod", "project_type": "mod"}
+        checksum = "a" * 128
+        versions = [
+            {
+                "id": "new-version",
+                "version_number": "2.0",
+                "version_type": "release",
+                "status": "listed",
+                "environment": "server_only",
+                "loaders": ["fabric"],
+                "game_versions": ["1.21.1"],
+                "files": [{
+                    "filename": "example-2.jar", "primary": True,
+                    "url": "https://cdn.modrinth.com/data/abc123/example-2.jar",
+                    "hashes": {"sha512": checksum},
+                }],
+            },
+            {
+                "id": "pinned-version",
+                "version_number": "1.0",
+                "version_type": "release",
+                "status": "listed",
+                "environment": "server_only",
+                "loaders": ["fabric"],
+                "game_versions": ["1.21.1"],
+                "files": [{
+                    "filename": "example-1.jar", "primary": True,
+                    "url": "https://cdn.modrinth.com/data/abc123/example-1.jar",
+                    "hashes": {"sha512": checksum},
+                }],
+            },
+        ]
+        with tempfile.TemporaryDirectory() as temp:
+            profile = _profile(Path(temp))
+            with patch("minecraft_server_creator.catalog._request_json", side_effect=[project, versions]):
+                plan = ContentCatalog().prepare_install(
+                    "modrinth", "mod", "abc123", profile, version_id="pinned-version"
+                )
+        self.assertEqual(plan.file_version, "1.0")
+        self.assertEqual(plan.file_name, "example-1.jar")
+
     def test_beta_modrinth_build_requires_explicit_install_opt_in(self):
         checksum = "b" * 128
         project = {"id": "wKkoqHrH", "slug": "geyser", "title": "Geyser", "project_type": "mod"}
@@ -491,9 +533,18 @@ class ContentCatalogTests(unittest.TestCase):
             profile.minecraft_version = "26.3"
             catalog = ContentCatalog()
             with patch("minecraft_server_creator.catalog._request_json", side_effect=[project, versions]):
-                plan = catalog.prepare_install("modrinth", "mod", "wKkoqHrH", profile, include_beta=True)
+                plan = catalog.prepare_install(
+                    "modrinth", "mod", "wKkoqHrH", profile, include_beta=True, version_id="beta-version"
+                )
             self.assertEqual(plan.release_channel, "beta")
             self.assertEqual(plan.required_dependencies, ("P7dR8mSH",))
+            with patch("minecraft_server_creator.catalog._request_json", side_effect=[project, versions]):
+                with self.assertRaisesRegex(CatalogError, "Kanal: stabil"):
+                    catalog.prepare_install("modrinth", "mod", "wKkoqHrH", profile, version_id="beta-version")
+            with patch("minecraft_server_creator.catalog._request_json") as request:
+                with self.assertRaisesRegex(CatalogError, "Versions-ID ist ungültig"):
+                    catalog.prepare_install("modrinth", "mod", "wKkoqHrH", profile, version_id="bad id")
+                request.assert_not_called()
             with patch("minecraft_server_creator.catalog.download_file", side_effect=_write_zip) as download:
                 with self.assertRaisesRegex(CatalogError, "ausdrückliche Opt-in"):
                     catalog.install(plan, profile)

@@ -206,6 +206,57 @@ class ManagerTests(unittest.TestCase):
             with self.assertRaises(ManagerError):
                 manager.update_settings(profile.slug, {"difficulty": "impossible"})
 
+    def test_resource_pack_configuration_preserves_properties_and_requires_acceptance(self):
+        with tempfile.TemporaryDirectory() as temp:
+            manager = ServerManager(
+                store=ConfigStore(Path(temp) / "config.json"),
+                metadata=FakeMetadata(),
+                services=FakeServices(),
+            )
+            manager.setup(Path(temp) / "servers", PortSettings())
+            profile = manager.create_server("Pack test")
+            properties_path = manager.configure_resource_pack(
+                profile.slug,
+                url="https://cdn.modrinth.com/data/example/pack.zip",
+                sha1="A" * 40,
+                required=True,
+            )
+            values = read_properties(properties_path)
+            self.assertEqual(values["resource-pack"], "https://cdn.modrinth.com/data/example/pack.zip")
+            self.assertEqual(values["resource-pack-sha1"], "a" * 40)
+            self.assertEqual(values["require-resource-pack"], "true")
+            self.assertEqual(values["server-port"], "25565")
+
+            manager.configure_resource_pack(
+                profile.slug,
+                url="https://cdn.modrinth.com/data/example/optional.zip",
+                sha1="b" * 40,
+                required=False,
+            )
+            self.assertEqual(read_properties(properties_path)["require-resource-pack"], "false")
+
+    def test_resource_pack_validation_rejects_bad_url_hash_and_running_server(self):
+        with tempfile.TemporaryDirectory() as temp:
+            services = FakeServices()
+            manager = ServerManager(
+                store=ConfigStore(Path(temp) / "config.json"), metadata=FakeMetadata(), services=services
+            )
+            manager.setup(Path(temp) / "servers", PortSettings())
+            profile = manager.create_server("Pack validation")
+            with self.assertRaisesRegex(ManagerError, "HTTPS"):
+                manager.configure_resource_pack(
+                    profile.slug, url="http://example.com/pack.zip", sha1="a" * 40, required=True
+                )
+            with self.assertRaisesRegex(ManagerError, "40 Hexadezimalzeichen"):
+                manager.configure_resource_pack(
+                    profile.slug, url="https://example.com/pack.zip", sha1="bad", required=True
+                )
+            services.active = True
+            with self.assertRaisesRegex(ManagerError, "Stoppe den Server"):
+                manager.configure_resource_pack(
+                    profile.slug, url="https://example.com/pack.zip", sha1="a" * 40, required=True
+                )
+
     def test_rejects_unknown_server_type_without_creating_profile(self):
         with tempfile.TemporaryDirectory() as temp:
             manager = ServerManager(store=ConfigStore(Path(temp) / "config.json"), metadata=FakeMetadata())

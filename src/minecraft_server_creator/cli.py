@@ -349,13 +349,22 @@ def _install_catalog_project(
     project_id: str,
     *,
     assume_yes: bool = False,
+    include_beta: bool = False,
+    version_id: str | None = None,
 ) -> None:
     profile = manager.get_profile(profile_slug)
     if manager.services.is_active(profile):
         raise ManagerError("Stoppe den Server vor der Installation von Mods, Plugins oder Datapacks.")
     destination = catalog.destination(profile, kind)
-    plan = catalog.prepare_install(source, kind, project_id, profile)
-    print(f"{plan.project_title} — {plan.file_version}")
+    plan = catalog.prepare_install(
+        source,
+        kind,
+        project_id,
+        profile,
+        include_beta=include_beta,
+        version_id=version_id,
+    )
+    print(f"{plan.project_title} — {plan.file_version} ({plan.release_channel})")
     print(f"Quelle: {plan.source}; Datei: {plan.file_name}; Ziel: {destination}/")
     print(f"Projektseite: {plan.project_url}")
     if plan.required_dependencies:
@@ -375,7 +384,7 @@ def _install_catalog_project(
         if not _yes_no("Diese Katalogdatei installieren?", default=False):
             print("Installation abgebrochen.")
             return
-    installed = catalog.install(plan, profile)
+    installed = catalog.install(plan, profile, allow_beta=include_beta)
     print(f"Installiert: {installed}")
 
 
@@ -417,7 +426,21 @@ def _catalog_command(manager: ServerManager, args: argparse.Namespace) -> None:
             args.kind,
             args.project_id,
             assume_yes=args.yes,
+            include_beta=args.allow_beta,
+            version_id=args.version_id,
         )
+
+
+def _resource_pack_command(manager: ServerManager, args: argparse.Namespace) -> None:
+    properties_path = manager.configure_resource_pack(
+        args.server,
+        url=args.url,
+        sha1=args.sha1,
+        required=args.required,
+    )
+    state = "verpflichtend" if args.required else "optional"
+    print(f"Server-Ressourcenpaket ({state}) in {properties_path} konfiguriert.")
+    print("Die Änderung wird beim nächsten Serverstart übernommen.")
 
 
 def _geyser_command(manager: ServerManager, args: argparse.Namespace) -> None:
@@ -703,14 +726,26 @@ def build_parser() -> argparse.ArgumentParser:
     catalog_search.add_argument("--source", choices=("modrinth", "curseforge"), required=True)
     catalog_search.add_argument("--kind", choices=("mod", "plugin", "datapack"), required=True)
     catalog_search.add_argument("--limit", type=int, default=10, help="Maximale Trefferzahl (1–50)")
-    catalog_install = catalog_sub.add_parser("install", help="Neueste stabile kompatible Datei installieren")
+    catalog_install = catalog_sub.add_parser("install", help="Neueste stabile kompatible Datei oder festgelegte Modrinth-Version installieren")
     catalog_install.add_argument("server", help="Servername oder Profil-Slug")
     catalog_install.add_argument("project_id", help="Projekt-ID aus der Suche")
     catalog_install.add_argument("--source", choices=("modrinth", "curseforge"), required=True)
     catalog_install.add_argument("--kind", choices=("mod", "plugin", "datapack"), required=True)
+    catalog_install.add_argument("--version-id", help="Feste Modrinth-Versions-ID statt neuester passender Version")
+    catalog_install.add_argument("--allow-beta", action="store_true", help="Beta-Version ausdrücklich zulassen (nur Modrinth)")
     catalog_install.add_argument("--yes", action="store_true", help="Dateiinstallation ausdrücklich bestätigen")
     catalog_list = catalog_sub.add_parser("list", help="Kataloginstallationen eines Profils anzeigen")
     catalog_list.add_argument("server", help="Servername oder Profil-Slug")
+
+    resource_pack = sub.add_parser("resource-pack", help="Server-Ressourcenpaket in server.properties konfigurieren")
+    resource_pack_sub = resource_pack.add_subparsers(dest="resource_pack_action", required=True)
+    resource_pack_set = resource_pack_sub.add_parser("set", help="HTTPS-Ressourcenpaket setzen oder erzwingen")
+    resource_pack_set.add_argument("server", help="Servername oder Profil-Slug")
+    resource_pack_set.add_argument("--url", required=True, help="Direkte HTTPS-URL zur ZIP-Datei")
+    resource_pack_set.add_argument("--sha1", required=True, help="SHA-1-Hash der ZIP-Datei (40 Hex-Zeichen)")
+    required_group = resource_pack_set.add_mutually_exclusive_group(required=True)
+    required_group.add_argument("--required", dest="required", action="store_true", help="Spieler müssen das Pack annehmen")
+    required_group.add_argument("--optional", dest="required", action="store_false", help="Spieler dürfen ohne Pack beitreten")
 
     geyser = sub.add_parser("geyser", help="Geyser-Fabric für kompatible Fabric-Profile installieren/konfigurieren")
     geyser_sub = geyser.add_subparsers(dest="geyser_action", required=True)
@@ -773,6 +808,9 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "catalog":
             _ensure_setup(manager, store)
             _catalog_command(manager, args)
+        elif args.command == "resource-pack":
+            _ensure_setup(manager, store)
+            _resource_pack_command(manager, args)
         elif args.command == "geyser":
             _ensure_setup(manager, store)
             _geyser_command(manager, args)
