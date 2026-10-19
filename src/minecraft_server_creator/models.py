@@ -39,12 +39,13 @@ def slugify(name: str) -> str:
 @dataclass(frozen=True)
 class PortSettings:
     java_tcp: int = 25565
+    # Keep the historical field name for config compatibility; NetherNet uses this number on TCP and UDP.
     bedrock_udp: int | None = 19132
     voice_udp: int | None = 24454
 
     def __post_init__(self) -> None:
         validate_port(self.java_tcp, "Java-TCP-Port")
-        validate_port(self.bedrock_udp, "Bedrock-UDP-Port", optional=True)
+        validate_port(self.bedrock_udp, "Bedrock/Geyser-Port", optional=True)
         validate_port(self.voice_udp, "Voicechat-UDP-Port", optional=True)
         if self.bedrock_udp is not None and self.bedrock_udp == self.voice_udp:
             raise ValidationError("Bedrock/Geyser und Voicechat benötigen unterschiedliche UDP-Ports.")

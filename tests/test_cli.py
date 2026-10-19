@@ -27,6 +27,13 @@ class CliParserTests(unittest.TestCase):
         )
         self.assertEqual(datapack_search.kind, "datapack")
         self.assertEqual(datapack_search.source, "curseforge")
+        geyser = parser.parse_args(["geyser", "install", "fabric-home", "--allow-beta", "--yes"])
+        self.assertEqual(geyser.command, "geyser")
+        self.assertEqual(geyser.geyser_action, "install")
+        self.assertTrue(geyser.allow_beta)
+        self.assertTrue(geyser.yes)
+        configure_geyser = parser.parse_args(["geyser", "configure", "fabric-home"])
+        self.assertEqual(configure_geyser.geyser_action, "configure")
 
     def test_optional_port_can_be_disabled_explicitly(self):
         parser = build_parser()
@@ -47,6 +54,7 @@ class CliParserTests(unittest.TestCase):
         self.assertIn("configure", choices)
         self.assertIn("rcon", choices)
         self.assertIn("catalog", choices)
+        self.assertIn("geyser", choices)
         self.assertIn("start", choices)
         self.assertIn("autostart", choices)
 

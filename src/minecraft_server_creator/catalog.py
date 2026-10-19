@@ -31,6 +31,10 @@ class CatalogError(RuntimeError):
     """Raised when a catalogue result cannot be safely searched or installed."""
 
 
+class NoCompatibleVersionError(CatalogError):
+    """Raised when a project has no version for the selected game and loader."""
+
+
 @dataclass(frozen=True)
 class CatalogProject:
     source: str
@@ -58,6 +62,7 @@ class InstallPlan:
     algorithm: str
     required_dependencies: tuple[str, ...]
     minecraft_version: str
+    release_channel: str = "release"
 
 
 SERVER_ENVIRONMENTS = frozenset(
@@ -336,7 +341,14 @@ class ModrinthCatalog:
             )
         return projects
 
-    def prepare_install(self, project_id: str, kind: str, profile: ServerProfile) -> InstallPlan:
+    def prepare_install(
+        self,
+        project_id: str,
+        kind: str,
+        profile: ServerProfile,
+        *,
+        include_beta: bool = False,
+    ) -> InstallPlan:
         loaders = _allowed_profile_loader(profile, kind)
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", project_id):
             raise CatalogError("Die Modrinth-Projekt-ID bzw. der Slug ist ungültig.")
@@ -358,8 +370,9 @@ class ModrinthCatalog:
         versions = _request_json(versions_url, "api.modrinth.com")
         if not isinstance(versions, list):
             raise CatalogError("Modrinth lieferte eine ungültige Versionsliste.")
+        accepted_channels = {"release", "beta"} if include_beta else {"release"}
         for version in versions:
-            if not isinstance(version, dict) or version.get("version_type") != "release":
+            if not isinstance(version, dict) or version.get("version_type") not in accepted_channels:
                 continue
             if version.get("status") not in {None, "listed"}:
                 continue
@@ -412,10 +425,12 @@ class ModrinthCatalog:
                 algorithm,
                 dependencies,
                 profile.minecraft_version,
+                str(version.get("version_type")),
             )
-        raise CatalogError(
-            f"Für {project_id} wurde keine stabile, serverfähige {kind}-Version für Minecraft "
-            f"{profile.minecraft_version} und Loader {', '.join(loaders)} gefunden."
+        channel_message = "stabil oder Beta" if include_beta else "stabil"
+        raise NoCompatibleVersionError(
+            f"Für {project_id} wurde keine passende serverfähige {kind}-Version (Kanal: {channel_message}) "
+            f"für Minecraft {profile.minecraft_version} und Loader {', '.join(loaders)} gefunden."
         )
 
 
@@ -640,8 +655,23 @@ class ContentCatalog:
             raise CatalogError("Die Ergebniszahl muss zwischen 1 und 50 liegen.")
         return self._provider(source).search(query.strip(), kind, profile, limit)
 
-    def prepare_install(self, source: str, kind: str, project_id: str, profile: ServerProfile) -> InstallPlan:
-        return self._provider(source).prepare_install(project_id.strip(), kind, profile)
+    def prepare_install(
+        self,
+        source: str,
+        kind: str,
+        project_id: str,
+        profile: ServerProfile,
+        *,
+        include_beta: bool = False,
+    ) -> InstallPlan:
+        provider = self._provider(source)
+        if include_beta and source != "modrinth":
+            raise CatalogError("Das ausdrückliche Beta-Opt-in wird derzeit nur für Modrinth unterstützt.")
+        if source == "modrinth":
+            if include_beta:
+                return provider.prepare_install(project_id.strip(), kind, profile, include_beta=True)
+            return provider.prepare_install(project_id.strip(), kind, profile)
+        return provider.prepare_install(project_id.strip(), kind, profile)
 
     @staticmethod
     def destination(profile: ServerProfile, kind: str) -> str:
@@ -650,9 +680,13 @@ class ContentCatalog:
             return f"{_datapack_world_name(profile)}/datapacks"
         return "mods" if kind == "mod" else "plugins"
 
-    def install(self, plan: InstallPlan, profile: ServerProfile) -> Path:
+    def install(self, plan: InstallPlan, profile: ServerProfile, *, allow_beta: bool = False) -> Path:
         if plan.minecraft_version != profile.minecraft_version:
             raise CatalogError("Die Installationsauswahl passt nicht mehr zur Minecraft-Version dieses Profils.")
+        if plan.release_channel not in {"release", "beta"}:
+            raise CatalogError("Die Installationsauswahl enthält einen nicht unterstützten Veröffentlichungskanal.")
+        if plan.release_channel == "beta" and not allow_beta:
+            raise CatalogError("Beta-Dateien benötigen das ausdrückliche Opt-in allow_beta=True.")
         _allowed_profile_loader(profile, plan.kind)
         if plan.source not in {"modrinth", "curseforge"}:
             raise CatalogError("Unbekannte Katalogquelle in der Installationsauswahl.")
@@ -715,6 +749,7 @@ class ContentCatalog:
                 "project_url": plan.project_url,
                 "file_name": filename,
                 "file_version": plan.file_version,
+                "release_channel": plan.release_channel,
                 "path": relative_path,
                 "minecraft_version": profile.minecraft_version,
                 "loader": "datapack" if plan.kind == "datapack" else (
@@ -756,7 +791,10 @@ class ContentCatalog:
 
     @staticmethod
     def installed(profile: ServerProfile) -> list[dict[str, Any]]:
-        manifest_path = Path(profile.server_dir) / "config" / "catalog-installed.json"
+        config_dir = Path(profile.server_dir) / "config"
+        manifest_path = config_dir / "catalog-installed.json"
+        if config_dir.is_symlink() or manifest_path.is_symlink():
+            raise CatalogError("Die Katalog-Installationsliste und ihr Ordner dürfen keine symbolischen Links sein.")
         if not manifest_path.exists():
             return []
         try:

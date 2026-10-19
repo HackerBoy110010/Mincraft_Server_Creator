@@ -19,6 +19,8 @@ SSH-freundlicher Minecraft-Server-Manager mit einfachem Python-Textmenü. Das Re
 - lokales RCON nur über `127.0.0.1`, mit Passwortdatei und restriktiven Rechten
 - Online-Spielerliste und Live-Spielerdaten; Inventar lesen sowie einzelne Plätze bei Vanilla 1.17+ ändern
 - Mod-/Plugin-/Datapack-Suche und Installation aus Modrinth und CurseForge mit Minecraft-Version-/Loaderfiltern, Prüfsummen und getrennten Zielordnern; Datapacks landen in `<level-name>/datapacks/` (Standardwelt `world`)
+- Geyser-Fabric-Installation für reine Fabric-Profile auf der neuesten stabilen Minecraft-Version; passende stabile Fabric API wird automatisch ergänzt, Beta-Geyser nur nach ausdrücklichem Opt-in (`--allow-beta`)
+- Geyser-NetherNet-Konfiguration für den Profilport nach dem ersten Serverstart; die Portnummer gilt dabei für TCP und UDP
 - Python-Quellinstallation und interaktives Terminalmenü
 
 **Noch nicht implementiert:** automatische Firewallregeln und Backup-Wiederherstellung. Der CurseForge-Katalog benötigt einen API-Schlüssel in `CURSEFORGE_API_KEY`; er wird nicht in der Serverkonfiguration gespeichert. Katalogabhängigkeiten werden angezeigt, aber nicht automatisch installiert. Plugins können nur für Arclight ausgewählt werden; Modrinth-Ergebnisse werden auf Bukkit-/Spigot-Dateien gefiltert. CurseForge kann Paper-only-Dateien nicht sicher herausfiltern. Da Arclight keine Paper-only-Kompatibilität dokumentiert, prüfe vor dem Start die Herstellerangaben. RCON ist nur für Vanilla eingebunden und im echten Minecraft-Serverbetrieb noch nicht live getestet; Inventarzugriff betrifft ausschließlich online befindliche Spieler. Die Vanilla-, Fabric-, Forge-, NeoForge- und Arclight-Installer sowie Katalogfunktionen sind unit-getestet, aber echte Downloads und Serverstarts noch nicht live verifiziert. Forge/NeoForge führen den offiziellen Installer bei der Profilerstellung mit der passend verwalteten Temurin-JRE aus. Arclight verlangt die explizite Basis-Auswahl `fabric`, `forge` oder `neoforge`. Nicht unterstützte oder nicht kompatible Loader-Builds werden abgelehnt.
@@ -87,10 +89,10 @@ Der CI-Workflow baut außerdem ein plattformunabhängiges Python-Wheel und Sourc
 `mcsc` öffnet das Textmenü. Beim ersten Lauf fragt `mcsc setup` nach dem Speicherordner und globalen Port-Standardwerten:
 
 - Java: TCP (Standard 25565)
-- Bedrock/Geyser: UDP (Standard 19132, optional)
+- Bedrock/Geyser: Portnummer (Standard 19132, optional; mit NetherNet benötigt Geyser dieselbe Portnummer über TCP und UDP)
 - Simple Voice Chat: UDP (Standard 24454, optional)
 
-Beim Anlegen eines Servers kann man die Werte übernehmen oder pro Serverprofil ändern. Das Setzen dieser Ports öffnet weder die Betriebssystem-Firewall noch den Heimrouter. Routerweiterleitung und lokale Firewallregeln bleiben manuell. Bedrock- und Voicechat-Ports werden gespeichert; Geyser bzw. Simple Voice Chat müssen zusätzlich als passende Mod/Plugin installiert und konfiguriert werden.
+Beim Anlegen eines Servers kann man die Werte übernehmen oder pro Serverprofil ändern. Das Setzen dieser Ports öffnet weder die Betriebssystem-Firewall noch den Heimrouter. Routerweiterleitung und lokale Firewallregeln bleiben manuell. Geyser-Fabric kann mit `mcsc geyser install <server>` installiert werden; die passende stabile Fabric API wird dabei automatisch ergänzt. Für den aktuellen 26.3-Build ist eine ausdrückliche Beta-Zustimmung erforderlich (im Terminal bestätigen, nichtinteraktiv `--allow-beta --yes`). Nach dem ersten Serverstart die Geyser-Konfiguration anlegen lassen, den Server stoppen und `mcsc geyser configure <server>` ausführen. Mit NetherNet müssen TCP und UDP auf dem Bedrock-Port erreichbar sein. Simple Voice Chat muss separat installiert und konfiguriert werden.
 
 `mcsc configure <server>` führt durch die üblichen Spieleinstellungen. Der Server muss dafür gestoppt sein; Änderungen werden beim nächsten Start übernommen.
 
@@ -147,6 +149,24 @@ RCON wird standardmäßig nicht aktiviert. `mcsc rcon enable <server>` muss bei 
 `catalog install` wählt standardmäßig die neueste stabile passende JAR-Datei bzw. für Datapacks eine ZIP-Datei. Vor dem Download wird interaktiv um Bestätigung gebeten (nichtinteraktive Aufrufe benötigen `--yes`); verfügbare SHA-1/SHA-512/MD5-Prüfsummen werden geprüft und vorhandene Dateien nicht überschrieben. Datapack-ZIPs müssen `pack.mcmeta` mit einem erkennbaren Format-Eintrag direkt im ZIP-Stammverzeichnis enthalten. Der Server muss während der Installation gestoppt sein. Ein Datapack wird nicht automatisch aktiviert: nach dem Start `/datapack list available` prüfen und, falls nötig, `/datapack enable file/<Dateiname>` ausführen. Installationsdaten werden in `config/catalog-installed.json` vermerkt; `mcsc catalog list <server>` zeigt sie an.
 
 Modrinth ist ohne Schlüssel nutzbar. CurseForge verlangt einen offiziellen API-Schlüssel als Umgebungsvariable `CURSEFORGE_API_KEY`; der Schlüssel wird ausschließlich im Request-Header verwendet und nicht gespeichert. Die CurseForge-Data-Packs-Kategorie wird dynamisch über die Kategorien-API aufgelöst, eine Kategorie-ID ist nicht fest im Programm hinterlegt. Die CurseForge-API bietet keinen verlässlichen Server-/Client-Filter für Mods, daher sind Herstellerangaben zu prüfen. Erforderliche Projektabhängigkeiten werden angezeigt, aber nicht automatisch installiert. Bei Plugins sind ebenfalls die Herstellerangaben zur Kompatibilität zu prüfen; Paper-only-Dateien werden nicht als Bukkit-/Spigot-kompatibel vorausgesetzt.
+
+## Geyser-Fabric für Minecraft 26.3
+
+`mcsc geyser install <server>` ist für reine Fabric-Profile auf der neuesten stabilen Minecraft-Version freigeschaltet. Die Installation holt Geyser-Fabric und die dazugehörige Fabric API von Modrinth, prüft die veröffentlichten SHA-512-Prüfsummen und legt beide Dateien in `mods/`. Der aktuelle kompatible Geyser-Fabric-Build ist als Beta markiert. Interaktiv fragt das Programm vor dem Beta-Einsatz und vor der Dateiinstallation; nichtinteraktiv müssen `--allow-beta --yes` gesetzt werden. Fabric API bleibt auf dem neuesten passenden stabilen Release. Arclight und Bukkit-/Spigot-Plugins sind bei dieser reinen Fabric-Auswahl nicht enthalten.
+
+Beispiel für einen neuen Crossplay-Server:
+
+```bash
+mcsc create crossplay --type fabric --version 26.3
+mcsc geyser install crossplay --allow-beta
+mcsc start crossplay
+# EULA ausdrücklich bestätigen; Geyser erzeugt dabei seine Erstkonfiguration.
+mcsc stop crossplay
+mcsc geyser configure crossplay
+mcsc start crossplay
+```
+
+`mcsc geyser configure` muss bei gestopptem Server laufen und setzt in `config/Geyser-Fabric/config.yml` den Profilport sowie `transport: nethernet`. Wenn du später den Profilport änderst, führe den Befehl vor dem nächsten Start erneut aus. Für den Standardport 19132 müssen Router und Firewall bei Verbindungen von außerhalb manuell sowohl **19132/TCP als auch 19132/UDP** freigeben/weiterleiten; das Programm ändert keine Netzwerkregeln. Der Bedrock-Port darf nicht mit dem Java-TCP-Port oder dem Voicechat-UDP-Port kollidieren. Geyser-Fabric funktioniert nur mit serverseitigen Mods; Mods, die auch auf dem Bedrock-/Java-Client installiert werden müssten, sind damit nicht abgedeckt. Floodgate für Bedrock-Spieler ohne Java-Konto wird nicht automatisch installiert. Siehe die offizielle [Geyser-Anleitung](https://geysermc.org/wiki/geyser/setup/) und [Versionsübersicht](https://geysermc.org/wiki/geyser/supported-versions/).
 
 ## Tests
 

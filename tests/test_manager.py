@@ -16,6 +16,9 @@ class FakeMetadata:
     def resolve_version(self, requested):
         return "1.21.4" if not requested or requested == "latest" else requested
 
+    def latest_release(self):
+        return "1.21.4"
+
     def version_info(self, version):
         return {"javaVersion": {"majorVersion": 21}}
 
@@ -66,6 +69,25 @@ class FakeArclight:
         target = Path(server_dir) / "server.jar"
         target.write_bytes(b"fake Arclight server jar")
         return LoaderInstallResult("1.0.1-8ec9529", "jar", "server.jar", loader_family)
+
+
+class FakeGeyserInstaller:
+    def __init__(self):
+        self.prepared = []
+        self.installed = []
+        self.configured = []
+
+    def prepare(self, profile, *, allow_beta=False):
+        self.prepared.append((profile.slug, allow_beta))
+        return "geyser-plan"
+
+    def install(self, profile, plan):
+        self.installed.append((profile.slug, plan))
+        return "geyser-result"
+
+    def configure(self, profile):
+        self.configured.append(profile.slug)
+        return Path(profile.server_dir) / "config" / "Geyser-Fabric" / "config.yml"
 
 
 class FakeServices:
@@ -278,6 +300,44 @@ class ManagerTests(unittest.TestCase):
                 manager.rcon_set_inventory_item(profile.slug, "Alex;op", 4, "diamond", 2)
             with self.assertRaisesRegex(ManagerError, "Inventarplatz"):
                 manager.rcon_set_inventory_item(profile.slug, "Alex", 36, "diamond", 2)
+
+
+    def test_geyser_operations_require_latest_stable_fabric_and_bedrock_port(self):
+        with tempfile.TemporaryDirectory() as temp:
+            geyser = FakeGeyserInstaller()
+            manager = ServerManager(
+                store=ConfigStore(Path(temp) / "config.json"),
+                metadata=FakeMetadata(),
+                services=FakeServices(),
+                fabric=FakeFabric(),
+                geyser=geyser,
+            )
+            manager.setup(Path(temp) / "servers", PortSettings())
+            fabric = manager.create_server("Current Fabric", server_type="fabric")
+            plan = manager.prepare_geyser_install(fabric.slug, allow_beta=True)
+            self.assertEqual(plan, "geyser-plan")
+            self.assertEqual(geyser.prepared, [(fabric.slug, True)])
+            self.assertEqual(manager.install_geyser(fabric.slug, plan), "geyser-result")
+            self.assertEqual(geyser.installed, [(fabric.slug, "geyser-plan")])
+            self.assertEqual(
+                manager.configure_geyser(fabric.slug),
+                Path(fabric.server_dir) / "config" / "Geyser-Fabric" / "config.yml",
+            )
+            self.assertEqual(geyser.configured, [fabric.slug])
+
+            vanilla = manager.create_server("Vanilla")
+            with self.assertRaisesRegex(ManagerError, "reinen Fabric"):
+                manager.prepare_geyser_install(vanilla.slug)
+
+            older = manager.create_server("Older Fabric", server_type="fabric", version="1.20.1")
+            with self.assertRaisesRegex(ManagerError, "neueste stabile Minecraft-Version"):
+                manager.prepare_geyser_install(older.slug)
+
+            no_bedrock = manager.create_server(
+                "No Bedrock", server_type="fabric", ports=PortSettings(bedrock_udp=None)
+            )
+            with self.assertRaisesRegex(ManagerError, "Bedrock-Port"):
+                manager.prepare_geyser_install(no_bedrock.slug)
 
 
 if __name__ == "__main__":

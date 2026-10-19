@@ -61,14 +61,16 @@ def describe_endpoints(ports: PortSettings, public_ip: str | None, lan_ip: str |
         public_host = endpoint_host(public_ip)
         lines.append(f"Öffentlich konfiguriert: {public_host}:{ports.java_tcp} (Java/TCP)")
         if ports.bedrock_udp:
-            lines.append(f"Öffentlich konfiguriert: {public_host}:{ports.bedrock_udp} (UDP; benötigt Geyser)")
+            lines.append(f"Öffentlich konfiguriert: {public_host}:{ports.bedrock_udp} (TCP; benötigt Geyser/NetherNet)")
+            lines.append(f"Öffentlich konfiguriert: {public_host}:{ports.bedrock_udp} (UDP; benötigt Geyser/NetherNet)")
         if ports.voice_udp:
             lines.append(f"Öffentlich konfiguriert: {public_host}:{ports.voice_udp} (UDP; benötigt Simple Voice Chat)")
     if lan_ip:
         local_host = endpoint_host(lan_ip)
         lines.append(f"Im Heimnetz: {local_host}:{ports.java_tcp} (Java/TCP)")
         if ports.bedrock_udp:
-            lines.append(f"Im Heimnetz: {local_host}:{ports.bedrock_udp} (Bedrock/Geyser/UDP)")
+            lines.append(f"Im Heimnetz: {local_host}:{ports.bedrock_udp} (Bedrock/Geyser TCP)")
+            lines.append(f"Im Heimnetz: {local_host}:{ports.bedrock_udp} (Bedrock/Geyser UDP)")
         if ports.voice_udp:
             lines.append(f"Im Heimnetz: {local_host}:{ports.voice_udp} (Voicechat/UDP)")
     if not lines:

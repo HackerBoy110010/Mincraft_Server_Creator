@@ -463,5 +463,45 @@ class ContentCatalogTests(unittest.TestCase):
             download.assert_not_called()
 
 
+    def test_beta_modrinth_build_requires_explicit_install_opt_in(self):
+        checksum = "b" * 128
+        project = {"id": "wKkoqHrH", "slug": "geyser", "title": "Geyser", "project_type": "mod"}
+        versions = [
+            {
+                "id": "beta-version",
+                "version_number": "2.12.0-b1265",
+                "version_type": "beta",
+                "status": "listed",
+                "environment": "server_only",
+                "loaders": ["fabric"],
+                "game_versions": ["26.3"],
+                "dependencies": [{"dependency_type": "required", "project_id": "P7dR8mSH"}],
+                "files": [
+                    {
+                        "filename": "Geyser-Fabric-2.12.0-b1265.jar",
+                        "primary": True,
+                        "url": "https://cdn.modrinth.com/data/wKkoqHrH/Geyser-Fabric-2.12.0-b1265.jar",
+                        "hashes": {"sha512": checksum},
+                    }
+                ],
+            }
+        ]
+        with tempfile.TemporaryDirectory() as temp:
+            profile = _profile(Path(temp))
+            profile.minecraft_version = "26.3"
+            catalog = ContentCatalog()
+            with patch("minecraft_server_creator.catalog._request_json", side_effect=[project, versions]):
+                plan = catalog.prepare_install("modrinth", "mod", "wKkoqHrH", profile, include_beta=True)
+            self.assertEqual(plan.release_channel, "beta")
+            self.assertEqual(plan.required_dependencies, ("P7dR8mSH",))
+            with patch("minecraft_server_creator.catalog.download_file", side_effect=_write_zip) as download:
+                with self.assertRaisesRegex(CatalogError, "ausdrückliche Opt-in"):
+                    catalog.install(plan, profile)
+                download.assert_not_called()
+                installed = catalog.install(plan, profile, allow_beta=True)
+            self.assertEqual(installed.name, "Geyser-Fabric-2.12.0-b1265.jar")
+            self.assertEqual(catalog.installed(profile)[0]["release_channel"], "beta")
+
+
 if __name__ == "__main__":
     unittest.main()

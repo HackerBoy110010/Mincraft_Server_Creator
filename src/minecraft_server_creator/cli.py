@@ -7,6 +7,7 @@ import sys
 
 from .catalog import CatalogError, ContentCatalog
 from .config import AppConfig, ConfigError, ConfigStore
+from .geyser import GeyserBetaOptInRequired, GeyserError
 from .manager import ManagerError, ServerManager
 from .minecraft import MinecraftDownloadError
 from .models import ARCLIGHT_LOADER_FAMILIES, IMPLEMENTED_SERVER_TYPES, SERVER_TYPES, PortSettings, ValidationError, validate_port
@@ -72,7 +73,7 @@ def _setup(manager: ServerManager) -> AppConfig:
     try:
         ports = PortSettings(
             java_tcp=_ask_port("Java-Port (TCP)", defaults.java_tcp),
-            bedrock_udp=_ask_port("Bedrock/Geyser-Port (UDP; 'aus' falls nicht gebraucht)", defaults.bedrock_udp, optional=True),
+            bedrock_udp=_ask_port("Bedrock/Geyser-Port (TCP+UDP für NetherNet; 'aus' falls nicht gebraucht)", defaults.bedrock_udp, optional=True),
             voice_udp=_ask_port("Simple Voice Chat-Port (UDP; 'aus' falls nicht gebraucht)", defaults.voice_udp, optional=True),
         )
         config = manager.setup(root, ports)
@@ -143,7 +144,7 @@ def _create(manager: ServerManager, args: argparse.Namespace) -> None:
         _ask_port("Java-Port (TCP)", defaults.java_tcp) if interactive else defaults.java_tcp
     )
     bedrock_port = args.bedrock_port if args.bedrock_port is not _UNSET else (
-        _ask_port("Bedrock/Geyser-Port (UDP; 'aus' falls nicht gebraucht)", defaults.bedrock_udp, optional=True)
+        _ask_port("Bedrock/Geyser-Port (TCP+UDP für NetherNet; 'aus' falls nicht gebraucht)", defaults.bedrock_udp, optional=True)
         if interactive else defaults.bedrock_udp
     )
     voice_port = args.voice_port if args.voice_port is not _UNSET else (
@@ -196,7 +197,7 @@ def _start(manager: ServerManager, selector: str) -> None:
         if not _yes_no("Trotzdem fortfahren?", default=False):
             return
     if profile.ports.bedrock_udp or profile.ports.voice_udp:
-        print("Hinweis: Bedrock- und Voicechat-Ports werden erst von den passenden Mods/Plugins verwendet.")
+        print("Hinweis: Geyser nutzt den Bedrock-Port über TCP und UDP; Voicechat nutzt seinen UDP-Port.")
     profile = manager.start(profile.slug, confirm_linger=_confirm_linger)
     print(f"Server '{profile.name}' wird im Hintergrund gestartet.")
     print(f"Logs: mcsc logs {shlex.quote(profile.slug)}")
@@ -224,7 +225,7 @@ def _show_list(manager: ServerManager) -> None:
         loader = f" / Loader{family} {profile.loader_version}" if profile.loader_version else ""
         print(
             f"- {profile.name} [{profile.slug}] | {profile.server_type} {profile.minecraft_version}{loader} | {state} | {auto}\n"
-            f"  Java TCP {profile.ports.java_tcp}; Bedrock UDP {bedrock}; Voice UDP {voice}"
+            f"  Java TCP {profile.ports.java_tcp}; Bedrock/Geyser TCP+UDP {bedrock}; Voice UDP {voice}"
         )
     print()
 
@@ -245,7 +246,8 @@ def _show_ip(manager: ServerManager) -> None:
         for line in describe_endpoints(profile.ports, public_ip, lan_ip):
             print(f"  {line}")
     print("\nDas sind konfigurierte Adressen, keine Erreichbarkeitsgarantie. Router, Firewall und Provider prüfen.")
-    print("Bedrock und Voicechat funktionieren erst, wenn Geyser bzw. Simple Voice Chat installiert und konfiguriert sind.")
+    print("Geyser nutzt den Bedrock-Port mit NetherNet über TCP und UDP; Simple Voice Chat nutzt UDP.")
+    print("Geyser/Simple Voice Chat müssen trotzdem installiert und konfiguriert sein; Router und Firewall bleiben manuell.")
 
 
 def _configure(manager: ServerManager, selector: str) -> None:
@@ -391,7 +393,7 @@ def _catalog_command(manager: ServerManager, args: argparse.Namespace) -> None:
                 f"- {item.get('project_title', item.get('project_id', '?'))} "
                 f"[{item.get('source', '?')}/{item.get('kind', '?')}] "
                 f"MC {item.get('minecraft_version', '?')} / {item.get('file_version', '?')} "
-                f"— {item.get('path', '?')} ({state})"
+                f"({item.get('release_channel', 'release')}) — {item.get('path', '?')} ({state})"
             )
         return
     if args.catalog_action == "search":
@@ -416,6 +418,58 @@ def _catalog_command(manager: ServerManager, args: argparse.Namespace) -> None:
             args.project_id,
             assume_yes=args.yes,
         )
+
+
+def _geyser_command(manager: ServerManager, args: argparse.Namespace) -> None:
+    if args.geyser_action == "configure":
+        profile = manager.get_profile(args.server)
+        config_path = manager.configure_geyser(profile.slug)
+        print(
+            f"Geyser-Fabric ist auf {profile.ports.bedrock_udp}/TCP und /UDP mit NetherNet konfiguriert: "
+            f"{config_path}"
+        )
+        print("Für Verbindungen von außen müssen TCP und UDP auf diesem Port manuell freigegeben/weitergeleitet werden.")
+        return
+
+    allow_beta = args.allow_beta
+    try:
+        plan = manager.prepare_geyser_install(args.server, allow_beta=allow_beta)
+    except GeyserBetaOptInRequired as exc:
+        if not sys.stdin.isatty():
+            raise ManagerError(f"{exc} Nichtinteraktiv musst du --allow-beta angeben.") from exc
+        if not _yes_no(f"{exc} Beta ausdrücklich zulassen?", default=False):
+            print("Geyser-Installation abgebrochen.")
+            return
+        allow_beta = True
+        plan = manager.prepare_geyser_install(args.server, allow_beta=True)
+
+    channel = "Beta" if plan.geyser.release_channel == "beta" else "stabil"
+    print(f"Geyser-Fabric {plan.geyser.version} ({channel})")
+    print(f"Fabric API {plan.fabric_api.version} (stabil)")
+    print(f"Bedrock-Port: {plan.bedrock_port}/TCP + {plan.bedrock_port}/UDP; Transport: NetherNet")
+    needs_install = not plan.geyser.already_installed or not plan.fabric_api.already_installed
+    if needs_install and not args.yes:
+        if not sys.stdin.isatty():
+            raise ManagerError("Nichtinteraktive Geyser-Installationen benötigen die ausdrückliche Option --yes.")
+        if not _yes_no("Geyser-Fabric und die passende Fabric API installieren?", default=False):
+            print("Geyser-Installation abgebrochen.")
+            return
+
+    result = manager.install_geyser(args.server, plan)
+    geyser_state = "bereits vorhanden" if result.geyser_already_installed else "installiert"
+    api_state = "bereits vorhanden" if result.fabric_api_already_installed else "installiert"
+    print(f"Geyser-Fabric {result.geyser_version} ({result.geyser_release_channel}): {geyser_state} — {result.geyser_path}")
+    print(f"Fabric API {result.fabric_api_version}: {api_state} — {result.fabric_api_path}")
+    if result.configuration_path:
+        print(f"Geyser-Port und NetherNet wurden konfiguriert: {result.configuration_path}")
+    else:
+        profile = manager.get_profile(args.server)
+        print("Die Geyser-Konfiguration wird beim ersten Serverstart erzeugt.")
+        print("Danach den Server stoppen und den Port/NetherNet-Transport setzen:")
+        print(f"  mcsc stop {profile.slug}")
+        print(f"  mcsc geyser configure {profile.slug}")
+        print(f"  mcsc start {profile.slug}")
+    print("Netzwerkhinweis: Geyser benötigt TCP und UDP auf dem Bedrock-Port; Firewall/Router werden nicht geändert.")
 
 
 def _catalog_menu(manager: ServerManager) -> None:
@@ -464,6 +518,8 @@ def _menu(manager: ServerManager, store: ConfigStore) -> None:
             " 11) Grundeinstellungen / Standardports\n"
             " 12) RCON-Spielertools (nur lokale Verbindung)\n"
             " 13) Mod-/Plugin-/Datapack-Katalog (Modrinth/CurseForge)\n"
+            " 14) Geyser-Fabric + Fabric API installieren\n"
+            " 15) Geyser-Port/NetherNet konfigurieren (nach erstem Serverstart)\n"
             "  0) Beenden"
         )
         choice = input("Auswahl: ").strip()
@@ -488,11 +544,16 @@ def _menu(manager: ServerManager, store: ConfigStore) -> None:
                 profile = manager.get_profile(selector)
                 ports = PortSettings(
                     java_tcp=_ask_port("Neuer Java-Port (TCP)", profile.ports.java_tcp),
-                    bedrock_udp=_ask_port("Neuer Bedrock/Geyser-Port (UDP)", profile.ports.bedrock_udp, optional=True),
+                    bedrock_udp=_ask_port("Neuer Bedrock/Geyser-Port (TCP+UDP)", profile.ports.bedrock_udp, optional=True),
                     voice_udp=_ask_port("Neuer Voicechat-Port (UDP)", profile.ports.voice_udp, optional=True),
                 )
-                manager.update_ports(selector, ports)
+                updated = manager.update_ports(selector, ports)
                 print("Ports gespeichert. Ein laufender Server übernimmt Änderungen erst nach dem Neustart.")
+                if updated.server_type == "fabric":
+                    print(
+                        f"Falls Geyser installiert ist, vor dem nächsten Start mit `mcsc geyser configure {updated.slug}` "
+                        "den Bedrock-Port aktualisieren."
+                    )
             elif choice == "7":
                 selector = _choose_profile(manager)
                 profile = manager.get_profile(selector)
@@ -512,9 +573,24 @@ def _menu(manager: ServerManager, store: ConfigStore) -> None:
                 _rcon_menu(manager)
             elif choice == "13":
                 _catalog_menu(manager)
+            elif choice == "14":
+                _geyser_command(
+                    manager,
+                    argparse.Namespace(
+                        geyser_action="install",
+                        server=_choose_profile(manager),
+                        allow_beta=False,
+                        yes=False,
+                    ),
+                )
+            elif choice == "15":
+                _geyser_command(
+                    manager,
+                    argparse.Namespace(geyser_action="configure", server=_choose_profile(manager)),
+                )
             else:
                 print("Bitte eine gültige Menüoption eingeben.")
-        except (CatalogError, ManagerError, ConfigError, SystemdError, RuntimeErrorMCSC, MinecraftDownloadError, PropertiesError, ValueError, OSError) as exc:
+        except (CatalogError, GeyserError, ManagerError, ConfigError, SystemdError, RuntimeErrorMCSC, MinecraftDownloadError, PropertiesError, ValueError, OSError) as exc:
             print(f"Fehler: {exc}", file=sys.stderr)
 
 
@@ -539,7 +615,7 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--version", default=None, help="Minecraft-Version oder 'latest'")
     create.add_argument("--memory-mb", type=int, default=None, help="Maximaler Arbeitsspeicher in MB")
     create.add_argument("--java-port", type=int, default=None, help="Java-Port/TCP")
-    create.add_argument("--bedrock-port", type=_optional_port_arg, default=_UNSET, help="Bedrock-Port/UDP oder 'off'")
+    create.add_argument("--bedrock-port", type=_optional_port_arg, default=_UNSET, help="Bedrock/Geyser-Port/TCP+UDP oder 'off'")
     create.add_argument("--voice-port", type=_optional_port_arg, default=_UNSET, help="Voicechat-Port/UDP oder 'off'")
     create.add_argument("--autostart", action="store_true", help="Nach Host-Neustart automatisch starten")
 
@@ -552,7 +628,7 @@ def build_parser() -> argparse.ArgumentParser:
     ports = sub.add_parser("ports", help="Ports eines Serverprofils ändern")
     ports.add_argument("server")
     ports.add_argument("--java", type=int, required=True, help="Java/TCP-Port")
-    ports.add_argument("--bedrock", type=_optional_port_arg, default=_UNSET, help="Bedrock/UDP-Port oder off")
+    ports.add_argument("--bedrock", type=_optional_port_arg, default=_UNSET, help="Bedrock/Geyser-Port/TCP+UDP oder off")
     ports.add_argument("--voice", type=_optional_port_arg, default=_UNSET, help="Voicechat/UDP-Port oder off")
 
     rcon = sub.add_parser("rcon", help="Lokale RCON-Spielertools für online befindliche Spieler")
@@ -588,6 +664,15 @@ def build_parser() -> argparse.ArgumentParser:
     catalog_install.add_argument("--yes", action="store_true", help="Dateiinstallation ausdrücklich bestätigen")
     catalog_list = catalog_sub.add_parser("list", help="Kataloginstallationen eines Profils anzeigen")
     catalog_list.add_argument("server", help="Servername oder Profil-Slug")
+
+    geyser = sub.add_parser("geyser", help="Geyser-Fabric für kompatible Fabric-Profile installieren/konfigurieren")
+    geyser_sub = geyser.add_subparsers(dest="geyser_action", required=True)
+    geyser_install = geyser_sub.add_parser("install", help="Geyser-Fabric und Fabric API installieren")
+    geyser_install.add_argument("server", help="Servername oder Profil-Slug")
+    geyser_install.add_argument("--allow-beta", action="store_true", help="Beta-Build ausdrücklich zulassen, falls kein stabiler passt")
+    geyser_install.add_argument("--yes", action="store_true", help="Dateiinstallation ausdrücklich bestätigen")
+    geyser_configure = geyser_sub.add_parser("configure", help="Geyser-Port und NetherNet nach dem ersten Serverstart setzen")
+    geyser_configure.add_argument("server", help="Servername oder Profil-Slug")
 
     auto = sub.add_parser("autostart", help="Autostart nach Host-Neustart einstellen")
     auto.add_argument("server")
@@ -630,6 +715,9 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "catalog":
             _ensure_setup(manager, store)
             _catalog_command(manager, args)
+        elif args.command == "geyser":
+            _ensure_setup(manager, store)
+            _geyser_command(manager, args)
         elif args.command == "rcon":
             if args.rcon_action == "enable":
                 manager.enable_rcon(args.server)
@@ -664,6 +752,11 @@ def main(argv: list[str] | None = None) -> int:
                 PortSettings(java_tcp=args.java, bedrock_udp=bedrock, voice_udp=voice),
             )
             print(f"Ports für '{updated.name}' aktualisiert.")
+            if updated.server_type == "fabric":
+                print(
+                    f"Falls Geyser installiert ist, vor dem nächsten Start mit `mcsc geyser configure {updated.slug}` "
+                    "den Bedrock-Port aktualisieren."
+                )
         elif args.command == "autostart":
             profile = manager.set_autostart(args.server, args.state == "on")
             print(f"Autostart für '{profile.name}' {'aktiviert' if profile.auto_start_on_boot else 'deaktiviert'}.")
@@ -675,6 +768,7 @@ def main(argv: list[str] | None = None) -> int:
     except (
         ConfigError,
         CatalogError,
+        GeyserError,
         ManagerError,
         SystemdError,
         RuntimeErrorMCSC,

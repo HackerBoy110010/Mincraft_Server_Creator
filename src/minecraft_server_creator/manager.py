@@ -12,6 +12,7 @@ import uuid
 from typing import Callable
 
 from .config import AppConfig, ConfigStore, data_directory
+from .geyser import GeyserInstallPlan, GeyserInstallResult, GeyserInstaller
 from .minecraft import MinecraftMetadataClient
 from .launch import LaunchConfigurationError, validate_profile_launch
 from .loaders import ArclightInstaller, FabricInstaller, ForgeInstaller, LoaderInstallResult, NeoForgeInstaller
@@ -46,6 +47,7 @@ class ServerManager:
         forge: ForgeInstaller | None = None,
         neoforge: NeoForgeInstaller | None = None,
         arclight: ArclightInstaller | None = None,
+        geyser: GeyserInstaller | None = None,
     ) -> None:
         self.store = store or ConfigStore()
         self.metadata = metadata or MinecraftMetadataClient()
@@ -55,6 +57,7 @@ class ServerManager:
         self.forge = forge or ForgeInstaller()
         self.neoforge = neoforge or NeoForgeInstaller()
         self.arclight = arclight or ArclightInstaller()
+        self.geyser = geyser or GeyserInstaller()
 
     def load(self) -> AppConfig:
         return self.store.load()
@@ -186,6 +189,41 @@ class ServerManager:
 
     def get_profile(self, selector: str) -> ServerProfile:
         return self.load().find_profile(selector)
+
+    def _validate_geyser_profile(self, profile: ServerProfile) -> None:
+        if self.services.is_active(profile):
+            raise ManagerError("Stoppe den Server vor der Installation oder Konfiguration von Geyser.")
+        if profile.server_type != "fabric":
+            raise ManagerError("Geyser-Fabric lässt sich nur auf einem reinen Fabric-Profil installieren.")
+        latest_version = self.metadata.latest_release()
+        if profile.minecraft_version != latest_version:
+            raise ManagerError(
+                f"Geyser-Fabric unterstützt laut offizieller Anleitung nur die neueste stabile Minecraft-Version "
+                f"({latest_version}); dieses Profil verwendet {profile.minecraft_version}."
+            )
+        bedrock_port = profile.ports.bedrock_udp
+        if bedrock_port is None:
+            raise ManagerError("Für Geyser muss ein Bedrock-Port gesetzt sein; ändere das Profil mit mcsc ports.")
+        if bedrock_port == profile.ports.java_tcp:
+            raise ManagerError("Der Geyser-Port benötigt TCP und UDP und darf nicht mit dem Java-TCP-Port kollidieren.")
+
+    def prepare_geyser_install(self, selector: str, *, allow_beta: bool = False) -> GeyserInstallPlan:
+        profile = self.get_profile(selector)
+        self._validate_geyser_profile(profile)
+        return self.geyser.prepare(profile, allow_beta=allow_beta)
+
+    def install_geyser(self, selector: str, plan: GeyserInstallPlan) -> GeyserInstallResult:
+        profile = self.get_profile(selector)
+        self._validate_geyser_profile(profile)
+        return self.geyser.install(profile, plan)
+
+    def configure_geyser(self, selector: str) -> Path:
+        profile = self.get_profile(selector)
+        if self.services.is_active(profile):
+            raise ManagerError("Stoppe den Server vor der Konfiguration von Geyser.")
+        if profile.server_type != "fabric":
+            raise ManagerError("Geyser-Fabric lässt sich nur auf einem reinen Fabric-Profil konfigurieren.")
+        return self.geyser.configure(profile)
 
     def update_ports(self, selector: str, ports: PortSettings) -> ServerProfile:
         config = self.load()
@@ -554,6 +592,6 @@ class ServerManager:
     def validate_port_values(java_tcp: int, bedrock_udp: int | None, voice_udp: int | None) -> PortSettings:
         return PortSettings(
             java_tcp=int(validate_port(java_tcp, "Java-TCP-Port")),
-            bedrock_udp=validate_port(bedrock_udp, "Bedrock-UDP-Port", optional=True),
+            bedrock_udp=validate_port(bedrock_udp, "Bedrock/Geyser-Port", optional=True),
             voice_udp=validate_port(voice_udp, "Voicechat-UDP-Port", optional=True),
         )
