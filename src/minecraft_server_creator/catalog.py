@@ -745,7 +745,14 @@ class ContentCatalog:
         if not isinstance(manifest, dict) or manifest.get("schema_version") != 1 or not isinstance(manifest.get("files"), list):
             raise CatalogError("Die Katalog-Installationsliste hat ein unbekanntes Format.")
         if any(item.get("path") == relative_path for item in manifest["files"] if isinstance(item, dict)):
-            raise CatalogError(f"{relative_path} ist bereits in der Katalog-Installationsliste eingetragen.")
+            # A world reset or manual deletion can remove the archive while leaving its
+            # manifest record behind. The target was verified absent above, so prune
+            # stale entries instead of blocking a legitimate reinstall.
+            manifest["files"] = [
+                item for item in manifest["files"]
+                if not isinstance(item, dict) or item.get("path") != relative_path
+            ]
+            self._write_manifest(manifest_path, manifest)
         try:
             download_file(download_url, target, checksum=digest, algorithm=algorithm, timeout=180.0)
             if not zipfile.is_zipfile(target):

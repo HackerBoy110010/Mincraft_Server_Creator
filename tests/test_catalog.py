@@ -448,6 +448,32 @@ class ContentCatalogTests(unittest.TestCase):
             with self.assertRaisesRegex(CatalogError, "cdn.modrinth.com"):
                 ContentCatalog().install(bad_plan, profile)
 
+    def test_stale_manifest_entry_does_not_block_reinstall_after_world_reset(self):
+        plan = InstallPlan(
+            "modrinth", "datapack", "dp123", "example-pack", "Example Pack",
+            "https://modrinth.com/datapack/example-pack", "example-pack.zip", "2.0",
+            "https://cdn.modrinth.com/data/dp123/example-pack.zip", "a" * 128, "sha512", (), "1.21.1"
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            profile = _profile(Path(temp))
+            manifest_path = Path(profile.server_dir) / "config" / "catalog-installed.json"
+            manifest_path.write_text(
+                json.dumps({
+                    "schema_version": 1,
+                    "files": [{"kind": "datapack", "path": "world/datapacks/example-pack.zip", "file_version": "1.0"}],
+                }),
+                encoding="utf-8",
+            )
+            catalog = ContentCatalog()
+            with patch("minecraft_server_creator.catalog.download_file", side_effect=_write_datapack_zip):
+                installed = catalog.install(plan, profile)
+
+            self.assertTrue(installed.is_file())
+            records = catalog.installed(profile)
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0]["path"], "world/datapacks/example-pack.zip")
+            self.assertEqual(records[0]["file_version"], "2.0")
+
     def test_existing_files_are_never_overwritten(self):
         plan = InstallPlan(
             "modrinth", "mod", "id", "slug", "Project", "https://modrinth.com/mod/slug",
