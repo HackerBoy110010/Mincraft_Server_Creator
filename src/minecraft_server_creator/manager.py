@@ -558,6 +558,74 @@ class ServerManager:
         except RconError as exc:
             raise ManagerError(str(exc)) from exc
 
+    def regenerate_world(
+        self,
+        selector: str,
+        *,
+        seed: str | None,
+        create_backup: bool,
+    ) -> tuple[str, Path | None]:
+        profile = self.get_profile(selector)
+        if self.services.is_active(profile):
+            raise ManagerError("Stoppe den Server, bevor du die Welt neu generierst.")
+
+        raw_server_dir = Path(profile.server_dir).expanduser()
+        if raw_server_dir.is_symlink():
+            raise ManagerError("Der Serverordner darf für eine Welt-Neugenerierung kein symbolischer Link sein.")
+        server_dir = raw_server_dir.resolve()
+        if not server_dir.is_dir():
+            raise ManagerError(f"Serverordner wurde nicht gefunden: {server_dir}")
+        properties_path = server_dir / "server.properties"
+        if properties_path.is_symlink():
+            raise ManagerError("server.properties darf für eine Welt-Neugenerierung kein symbolischer Link sein.")
+
+        properties = read_properties(properties_path)
+        world_name = properties.get("level-name", "world").strip() or "world"
+        world_component = Path(world_name)
+        if (
+            world_component.is_absolute()
+            or len(world_component.parts) != 1
+            or world_name in {".", ".."}
+            or "/" in world_name
+            or "\\" in world_name
+        ):
+            raise ManagerError("Der level-name ist kein sicherer Ordnername; die Welt wurde nicht verändert.")
+
+        seed_value = ""
+        if seed is not None:
+            seed_value = str(seed).strip()
+            if len(seed_value) > 128 or any(ord(character) < 32 or ord(character) == 127 for character in seed_value):
+                raise ManagerError("Ein Welt-Seed darf höchstens 128 Zeichen lang sein und keine Steuerzeichen enthalten.")
+            if not seed_value:
+                seed_value = ""
+
+        world_dirs = (
+            server_dir / world_name,
+            server_dir / f"{world_name}_nether",
+            server_dir / f"{world_name}_the_end",
+        )
+        for world_dir in world_dirs:
+            if world_dir.is_symlink():
+                raise ManagerError(f"Weltordner darf kein symbolischer Link sein: {world_dir}")
+            if os.path.ismount(world_dir):
+                raise ManagerError(f"Weltordner darf kein separater Mountpoint sein: {world_dir}")
+            if world_dir.exists():
+                if not world_dir.is_dir() or world_dir.resolve().parent != server_dir:
+                    raise ManagerError(f"Weltpfad ist kein sicherer Ordner innerhalb des Serverprofils: {world_dir}")
+
+        backup_path = self.backup(profile.slug) if create_backup else None
+        update_properties(properties_path, {"level-seed": seed_value})
+        try:
+            for world_dir in world_dirs:
+                if world_dir.is_dir():
+                    shutil.rmtree(world_dir)
+        except OSError as exc:
+            detail = f"Ein oder mehrere Weltordner konnten nicht entfernt werden: {exc}"
+            if backup_path:
+                detail += f" Das vorherige Server-Backup liegt unter {backup_path}."
+            raise ManagerError(detail) from exc
+        return world_name, backup_path
+
     def backup(self, selector: str) -> Path:
         profile = self.get_profile(selector)
         if self.services.is_active(profile):
@@ -565,6 +633,8 @@ class ServerManager:
         server_dir = Path(profile.server_dir)
         backup_dir = server_dir / "backups"
         backup_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if os.name != "nt":
+            os.chmod(backup_dir, 0o700)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f-UTC")
         archive_path = backup_dir / f"{profile.slug}-{stamp}.tar.gz"
         try:
@@ -573,6 +643,8 @@ class ServerManager:
                     if child.name in {"backups", "logs"}:
                         continue
                     archive.add(child, arcname=child.name)
+            if os.name != "nt":
+                os.chmod(archive_path, 0o600)
         except (OSError, tarfile.TarError) as exc:
             archive_path.unlink(missing_ok=True)
             raise ManagerError(f"Backup fehlgeschlagen: {exc}") from exc

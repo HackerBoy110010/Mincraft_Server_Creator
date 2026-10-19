@@ -1,5 +1,6 @@
 import os
 import stat
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -338,6 +339,89 @@ class ManagerTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(ManagerError, "Bedrock-Port"):
                 manager.prepare_geyser_install(no_bedrock.slug)
+
+    def test_regenerate_world_backs_up_and_resets_all_dimensions_with_seed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            manager = ServerManager(
+                store=ConfigStore(Path(temp) / "config.json"),
+                metadata=FakeMetadata(),
+                services=FakeServices(),
+            )
+            manager.setup(Path(temp) / "servers", PortSettings())
+            profile = manager.create_server("World reset")
+            server_dir = Path(profile.server_dir)
+            update_properties(
+                server_dir / "server.properties",
+                {"level-name": "world", "level-seed": "old-seed"},
+            )
+            for folder in ("world", "world_nether", "world_the_end"):
+                world_dir = server_dir / folder
+                world_dir.mkdir()
+                (world_dir / "marker.dat").write_text(folder, encoding="utf-8")
+
+            world_name, backup_path = manager.regenerate_world(
+                profile.slug, seed="oak valley", create_backup=True
+            )
+
+            self.assertEqual(world_name, "world")
+            self.assertIsNotNone(backup_path)
+            self.assertTrue(backup_path.is_file())
+            if os.name != "nt":
+                self.assertEqual(stat.S_IMODE(backup_path.stat().st_mode), 0o600)
+            self.assertEqual(read_properties(server_dir / "server.properties")["level-seed"], "oak valley")
+            for folder in ("world", "world_nether", "world_the_end"):
+                self.assertFalse((server_dir / folder).exists())
+            with tarfile.open(backup_path, "r:gz") as archive:
+                names = set(archive.getnames())
+            for folder in ("world", "world_nether", "world_the_end"):
+                self.assertIn(f"{folder}/marker.dat", names)
+
+    def test_regenerate_world_without_seed_uses_random_seed_and_can_skip_backup(self):
+        with tempfile.TemporaryDirectory() as temp:
+            manager = ServerManager(
+                store=ConfigStore(Path(temp) / "config.json"),
+                metadata=FakeMetadata(),
+                services=FakeServices(),
+            )
+            manager.setup(Path(temp) / "servers", PortSettings())
+            profile = manager.create_server("Random world")
+            server_dir = Path(profile.server_dir)
+            update_properties(server_dir / "server.properties", {"level-seed": "previous-seed"})
+            (server_dir / "world").mkdir()
+
+            world_name, backup_path = manager.regenerate_world(
+                profile.slug, seed=None, create_backup=False
+            )
+
+            self.assertEqual(world_name, "world")
+            self.assertIsNone(backup_path)
+            self.assertEqual(read_properties(server_dir / "server.properties")["level-seed"], "")
+            self.assertFalse((server_dir / "world").exists())
+
+    def test_regenerate_world_requires_stopped_server_and_safe_level_name(self):
+        with tempfile.TemporaryDirectory() as temp:
+            services = FakeServices(active=True)
+            manager = ServerManager(
+                store=ConfigStore(Path(temp) / "config.json"), metadata=FakeMetadata(), services=services
+            )
+            manager.setup(Path(temp) / "servers", PortSettings())
+            profile = manager.create_server("Active world")
+            with self.assertRaisesRegex(ManagerError, "Stoppe den Server"):
+                manager.regenerate_world(profile.slug, seed=None, create_backup=False)
+
+        with tempfile.TemporaryDirectory() as temp:
+            manager = ServerManager(
+                store=ConfigStore(Path(temp) / "config.json"), metadata=FakeMetadata(), services=FakeServices()
+            )
+            manager.setup(Path(temp) / "servers", PortSettings())
+            profile = manager.create_server("Unsafe level")
+            server_dir = Path(profile.server_dir)
+            outside = Path(temp) / "outside"
+            outside.mkdir()
+            update_properties(server_dir / "server.properties", {"level-name": "../outside"})
+            with self.assertRaisesRegex(ManagerError, "sicherer Ordnername"):
+                manager.regenerate_world(profile.slug, seed=None, create_backup=False)
+            self.assertTrue(outside.is_dir())
 
 
 if __name__ == "__main__":

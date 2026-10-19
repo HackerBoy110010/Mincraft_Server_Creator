@@ -16,6 +16,7 @@ SSH-freundlicher Minecraft-Server-Manager mit einfachem Python-Textmenü. Das Re
 - Portkonfliktprüfung und Anzeige von LAN-/öffentlicher IP mit konfigurierten Endpunkten
 - geführte `server.properties`-Einstellungen für MOTD, Spielerlimit, Schwierigkeit, Spielmodus, PvP, Whitelist und Sichtweiten
 - manuelle Backups gestoppter Serverprofile
+- sichere Welt-Neugenerierung bei gestopptem Server: fragt vor jedem Reset nach einem Profil-Backup und unterstützt optionale Seeds
 - lokales RCON nur über `127.0.0.1`, mit Passwortdatei und restriktiven Rechten
 - Online-Spielerliste und Live-Spielerdaten; Inventar lesen sowie einzelne Plätze bei Vanilla 1.17+ ändern
 - Mod-/Plugin-/Datapack-Suche und Installation aus Modrinth und CurseForge mit Minecraft-Version-/Loaderfiltern, Prüfsummen und getrennten Zielordnern; Datapacks landen in `<level-name>/datapacks/` (Standardwelt `world`)
@@ -95,6 +96,17 @@ Der CI-Workflow baut außerdem ein plattformunabhängiges Python-Wheel und Sourc
 Beim Anlegen eines Servers kann man die Werte übernehmen oder pro Serverprofil ändern. Das Setzen dieser Ports öffnet weder die Betriebssystem-Firewall noch den Heimrouter. Routerweiterleitung und lokale Firewallregeln bleiben manuell. Geyser-Fabric kann mit `mcsc geyser install <server>` installiert werden; die passende stabile Fabric API wird dabei automatisch ergänzt. Für den aktuellen 26.3-Build ist eine ausdrückliche Beta-Zustimmung erforderlich (im Terminal bestätigen, nichtinteraktiv `--allow-beta --yes`). Nach dem ersten Serverstart die Geyser-Konfiguration anlegen lassen, den Server stoppen und `mcsc geyser configure <server>` ausführen. Mit NetherNet müssen TCP und UDP auf dem Bedrock-Port erreichbar sein. Simple Voice Chat muss separat installiert und konfiguriert werden.
 
 `mcsc configure <server>` führt durch die üblichen Spieleinstellungen. Der Server muss dafür gestoppt sein; Änderungen werden beim nächsten Start übernommen.
+
+### Welt neu generieren
+
+`mcsc world regenerate <server>` setzt Oberwelt, Nether und End zurück. Der Server muss gestoppt sein. Interaktiv fragt MCSC nach einem optionalen Seed (leere Eingabe = zufälliger Seed), fragt bei jedem Reset, ob vorher ein vollständiges Server-Backup erstellt werden soll, und verlangt zur Sicherheit die Eingabe des Profil-Slugs. Ein Reset entfernt Weltdateien, Spielerfortschritt und Datapacks der Welt; Servereinstellungen und Mods bleiben erhalten. Ohne Seed wird ein eventuell gespeicherter Seed gelöscht, damit Minecraft zufällig generiert.
+
+Für nichtinteraktive Aufrufe müssen Backup-Entscheidung und Bestätigung ausdrücklich angegeben werden:
+
+```bash
+mcsc world regenerate zuhause --seed "12345" --backup --yes
+mcsc world regenerate zuhause --no-backup --yes
+```
 
 ```bash
 mcsc setup

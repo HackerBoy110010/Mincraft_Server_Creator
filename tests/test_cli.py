@@ -1,6 +1,9 @@
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
-from minecraft_server_creator.cli import build_parser
+from minecraft_server_creator.cli import _world_regenerate_command, build_parser
+from minecraft_server_creator.manager import ManagerError
 
 
 class CliParserTests(unittest.TestCase):
@@ -34,6 +37,66 @@ class CliParserTests(unittest.TestCase):
         self.assertTrue(geyser.yes)
         configure_geyser = parser.parse_args(["geyser", "configure", "fabric-home"])
         self.assertEqual(configure_geyser.geyser_action, "configure")
+        regenerate = parser.parse_args(
+            ["world", "regenerate", "home", "--seed", "oak-valley", "--backup", "--yes"]
+        )
+        self.assertEqual(regenerate.command, "world")
+        self.assertEqual(regenerate.world_action, "regenerate")
+        self.assertEqual(regenerate.seed, "oak-valley")
+        self.assertTrue(regenerate.backup)
+        self.assertTrue(regenerate.yes)
+        random_world = parser.parse_args(["world", "regenerate", "home", "--no-backup"])
+        self.assertIsNone(random_world.seed)
+        self.assertFalse(random_world.backup)
+
+    def test_world_regeneration_requires_explicit_noninteractive_backup_and_confirmation(self):
+        class FakeManager:
+            def __init__(self):
+                self.services = SimpleNamespace(is_active=lambda _profile: False)
+                self.calls = []
+
+            @staticmethod
+            def get_profile(selector):
+                return SimpleNamespace(slug=selector)
+
+            def regenerate_world(self, selector, *, seed, create_backup):
+                self.calls.append((selector, seed, create_backup))
+                return "world", None
+
+        manager = FakeManager()
+        args = SimpleNamespace(server="home", seed="12345", backup=None, yes=True)
+        with patch("minecraft_server_creator.cli.sys.stdin", SimpleNamespace(isatty=lambda: False)):
+            with self.assertRaisesRegex(ManagerError, "--backup oder --no-backup"):
+                _world_regenerate_command(manager, args)
+            args.backup = False
+            args.yes = False
+            with self.assertRaisesRegex(ManagerError, "--yes"):
+                _world_regenerate_command(manager, args)
+            args.yes = True
+            _world_regenerate_command(manager, args)
+
+        self.assertEqual(manager.calls, [("home", "12345", False)])
+
+    def test_world_regeneration_interactive_flow_asks_seed_backup_and_confirmation(self):
+        class FakeManager:
+            def __init__(self):
+                self.services = SimpleNamespace(is_active=lambda _profile: False)
+                self.calls = []
+
+            @staticmethod
+            def get_profile(selector):
+                return SimpleNamespace(slug=selector)
+
+            def regenerate_world(self, selector, *, seed, create_backup):
+                self.calls.append((selector, seed, create_backup))
+                return "world", None
+
+        manager = FakeManager()
+        args = SimpleNamespace(server="home", seed=None, backup=None, yes=False)
+        with patch("minecraft_server_creator.cli.sys.stdin", SimpleNamespace(isatty=lambda: True)):
+            with patch("builtins.input", side_effect=["12345", "", "home"]):
+                _world_regenerate_command(manager, args)
+        self.assertEqual(manager.calls, [("home", "12345", True)])
 
     def test_optional_port_can_be_disabled_explicitly(self):
         parser = build_parser()
@@ -55,6 +118,7 @@ class CliParserTests(unittest.TestCase):
         self.assertIn("rcon", choices)
         self.assertIn("catalog", choices)
         self.assertIn("geyser", choices)
+        self.assertIn("world", choices)
         self.assertIn("start", choices)
         self.assertIn("autostart", choices)
 

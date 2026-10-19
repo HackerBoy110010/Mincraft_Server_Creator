@@ -472,6 +472,47 @@ def _geyser_command(manager: ServerManager, args: argparse.Namespace) -> None:
     print("Netzwerkhinweis: Geyser benötigt TCP und UDP auf dem Bedrock-Port; Firewall/Router werden nicht geändert.")
 
 
+def _world_regenerate_command(manager: ServerManager, args: argparse.Namespace) -> None:
+    profile = manager.get_profile(args.server)
+    interactive = sys.stdin.isatty()
+    if manager.services.is_active(profile):
+        raise ManagerError("Stoppe den Server, bevor du die Welt neu generierst.")
+
+    seed = args.seed
+    if seed is not None:
+        seed = str(seed).strip() or None
+    if seed is None and args.seed is None and interactive:
+        answer = input("Neuer Welt-Seed (leer = zufällig): ").strip()
+        seed = answer or None
+
+    create_backup = args.backup
+    if create_backup is None:
+        if not interactive:
+            raise ManagerError("Nichtinteraktive Welt-Resets benötigen --backup oder --no-backup.")
+        create_backup = _yes_no("Vorher ein vollständiges Server-Backup erstellen?", default=True)
+
+    if not args.yes:
+        if not interactive:
+            raise ManagerError("Nichtinteraktive Welt-Resets benötigen die ausdrückliche Option --yes.")
+        print("Der Reset entfernt Oberwelt, Nether, End, Spielerfortschritt und Datapacks der Welt.")
+        answer = input(f"Zum endgültigen Bestätigen den Profil-Slug '{profile.slug}' eingeben: ").strip()
+        if answer != profile.slug:
+            print("Welt-Neugenerierung abgebrochen; es wurden keine Weltdateien verändert.")
+            return
+
+    world_name, backup_path = manager.regenerate_world(
+        profile.slug,
+        seed=seed,
+        create_backup=bool(create_backup),
+    )
+    print(f"Welt '{world_name}' wird beim nächsten Start mit allen Dimensionen neu generiert.")
+    print(f"Seed: {seed if seed is not None else 'zufällig'}")
+    if backup_path:
+        print(f"Vorheriges vollständiges Server-Backup: {backup_path}")
+    else:
+        print("Für diesen Reset wurde kein Backup erstellt.")
+
+
 def _catalog_menu(manager: ServerManager) -> None:
     profile = manager.get_profile(_choose_profile(manager))
     kind = input("Installieren (mod/plugin/datapack): ").strip().lower()
@@ -520,6 +561,7 @@ def _menu(manager: ServerManager, store: ConfigStore) -> None:
             " 13) Mod-/Plugin-/Datapack-Katalog (Modrinth/CurseForge)\n"
             " 14) Geyser-Fabric + Fabric API installieren\n"
             " 15) Geyser-Port/NetherNet konfigurieren (nach erstem Serverstart)\n"
+            " 16) Welt neu generieren (optional mit Seed)\n"
             "  0) Beenden"
         )
         choice = input("Auswahl: ").strip()
@@ -587,6 +629,11 @@ def _menu(manager: ServerManager, store: ConfigStore) -> None:
                 _geyser_command(
                     manager,
                     argparse.Namespace(geyser_action="configure", server=_choose_profile(manager)),
+                )
+            elif choice == "16":
+                _world_regenerate_command(
+                    manager,
+                    argparse.Namespace(server=_choose_profile(manager), seed=None, backup=None, yes=False),
                 )
             else:
                 print("Bitte eine gültige Menüoption eingeben.")
@@ -674,6 +721,17 @@ def build_parser() -> argparse.ArgumentParser:
     geyser_configure = geyser_sub.add_parser("configure", help="Geyser-Port und NetherNet nach dem ersten Serverstart setzen")
     geyser_configure.add_argument("server", help="Servername oder Profil-Slug")
 
+    world = sub.add_parser("world", help="Minecraft-Welten verwalten")
+    world_sub = world.add_subparsers(dest="world_action", required=True)
+    world_regenerate = world_sub.add_parser("regenerate", help="Welt mit optionalem Seed neu generieren")
+    world_regenerate.add_argument("server", help="Servername oder Profil-Slug")
+    world_regenerate.add_argument("--seed", default=None, help="Welt-Seed; ohne diese Option wird zufällig generiert")
+    backup_group = world_regenerate.add_mutually_exclusive_group()
+    backup_group.add_argument("--backup", dest="backup", action="store_true", help="Vorher vollständiges Server-Backup erstellen")
+    backup_group.add_argument("--no-backup", dest="backup", action="store_false", help="Reset ohne vorheriges Backup ausführen")
+    world_regenerate.set_defaults(backup=None)
+    world_regenerate.add_argument("--yes", action="store_true", help="Welt-Reset ausdrücklich bestätigen")
+
     auto = sub.add_parser("autostart", help="Autostart nach Host-Neustart einstellen")
     auto.add_argument("server")
     auto.add_argument("state", choices=("on", "off"))
@@ -718,6 +776,10 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "geyser":
             _ensure_setup(manager, store)
             _geyser_command(manager, args)
+        elif args.command == "world":
+            _ensure_setup(manager, store)
+            if args.world_action == "regenerate":
+                _world_regenerate_command(manager, args)
         elif args.command == "rcon":
             if args.rcon_action == "enable":
                 manager.enable_rcon(args.server)
