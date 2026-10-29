@@ -742,7 +742,10 @@ def _menu(manager: ServerManager, store: ConfigStore) -> None:
             elif choice == "8":
                 manager.services.logs(manager.get_profile(_choose_profile(manager)))
             elif choice == "9":
-                backup = manager.backup(_choose_profile(manager))
+                backup = manager.backup(
+                    _choose_profile(manager),
+                    progress=lambda message: print(message, flush=True),
+                )
                 print(f"Backup erstellt: {backup}")
             elif choice == "10":
                 _show_ip(manager)
@@ -939,7 +942,11 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "logs":
             manager.services.logs(manager.get_profile(args.server), follow=args.follow)
         elif args.command == "backup":
-            print(f"Backup erstellt: {manager.backup(args.server)}")
+            backup = manager.backup(
+                args.server,
+                progress=lambda message: print(message, flush=True),
+            )
+            print(f"Backup erstellt: {backup}")
         elif args.command == "catalog":
             _ensure_setup(manager, store)
             _catalog_command(manager, args)
@@ -1003,6 +1010,13 @@ def main(argv: list[str] | None = None) -> int:
             _show_ip(manager)
         else:
             parser.print_help()
+    except KeyboardInterrupt:
+        print(
+            "Vorgang durch Strg+C abgebrochen. Prüfe vor einem erneuten Mod-Update den Serverstatus "
+            "und `mcsc mods backups <server>`.",
+            file=sys.stderr,
+        )
+        return 130
     except (
         ConfigError,
         CatalogError,

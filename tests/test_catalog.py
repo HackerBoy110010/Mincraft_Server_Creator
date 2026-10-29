@@ -531,6 +531,46 @@ class ContentCatalogTests(unittest.TestCase):
         self.assertEqual(plan.file_version, "1.0")
         self.assertEqual(plan.file_name, "example-1.jar")
 
+    def test_simple_voice_chat_style_beta_build_requires_explicit_opt_in(self):
+        checksum = "c" * 128
+        project = {
+            "id": "9eGKb6K1",
+            "slug": "simple-voice-chat",
+            "title": "Simple Voice Chat",
+            "project_type": "mod",
+        }
+        versions = [
+            {
+                "id": "voice-beta",
+                "version_number": "fabric-2.6.27+26.3",
+                "version_type": "beta",
+                "status": "listed",
+                "environment": "client_or_server_prefers_both",
+                "loaders": ["fabric"],
+                "game_versions": ["26.3"],
+                "files": [
+                    {
+                        "filename": "voicechat-fabric-2.6.27+26.3.jar",
+                        "primary": True,
+                        "url": "https://cdn.modrinth.com/data/9eGKb6K1/voicechat-fabric-2.6.27+26.3.jar",
+                        "hashes": {"sha512": checksum},
+                    }
+                ],
+            }
+        ]
+        with tempfile.TemporaryDirectory() as temp:
+            profile = _profile(Path(temp))
+            profile.minecraft_version = "26.3"
+            with patch("minecraft_server_creator.catalog._request_json", side_effect=[project, versions]):
+                with self.assertRaisesRegex(CatalogError, "Kanal: stabil"):
+                    ContentCatalog().prepare_install("modrinth", "mod", "9eGKb6K1", profile)
+            with patch("minecraft_server_creator.catalog._request_json", side_effect=[project, versions]):
+                plan = ContentCatalog().prepare_install(
+                    "modrinth", "mod", "9eGKb6K1", profile, include_beta=True
+                )
+        self.assertEqual(plan.file_version, "fabric-2.6.27+26.3")
+        self.assertEqual(plan.release_channel, "beta")
+
     def test_beta_modrinth_build_requires_explicit_install_opt_in(self):
         checksum = "b" * 128
         project = {"id": "wKkoqHrH", "slug": "geyser", "title": "Geyser", "project_type": "mod"}

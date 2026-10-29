@@ -391,6 +391,53 @@ class ManagerTests(unittest.TestCase):
             with self.assertRaisesRegex(ManagerError, "Bedrock-Port"):
                 manager.prepare_geyser_install(no_bedrock.slug)
 
+    def test_backup_reports_live_progress_and_excludes_logs_and_old_backups(self):
+        with tempfile.TemporaryDirectory() as temp:
+            manager = ServerManager(
+                store=ConfigStore(Path(temp) / "config.json"),
+                metadata=FakeMetadata(),
+                services=FakeServices(),
+            )
+            manager.setup(Path(temp) / "servers", PortSettings())
+            profile = manager.create_server("Backup progress")
+            server_dir = Path(profile.server_dir)
+            world = server_dir / "world"
+            world.mkdir()
+            (world / "region.dat").write_bytes(b"world data" * 100_000)
+            (server_dir / "logs").mkdir(exist_ok=True)
+            (server_dir / "logs" / "latest.log").write_text("log", encoding="utf-8")
+            messages = []
+
+            archive_path = manager.backup(profile.slug, progress=messages.append)
+
+            self.assertTrue(archive_path.is_file())
+            self.assertTrue(any("Backup-Fortschritt:" in message for message in messages))
+            self.assertTrue(any("100.0%" in message for message in messages))
+            self.assertIn("Komprimierung startet", messages[1])
+            self.assertTrue(messages[-1].startswith("Vollständiges Backup abgeschlossen:"))
+            with tarfile.open(archive_path, "r:gz") as archive:
+                names = set(archive.getnames())
+            self.assertIn("world/region.dat", names)
+            self.assertNotIn("logs/latest.log", names)
+            self.assertFalse(any(name.startswith("backups/") for name in names))
+
+    def test_backup_removes_partial_archive_on_keyboard_interrupt(self):
+        with tempfile.TemporaryDirectory() as temp:
+            manager = ServerManager(
+                store=ConfigStore(Path(temp) / "config.json"),
+                metadata=FakeMetadata(),
+                services=FakeServices(),
+            )
+            manager.setup(Path(temp) / "servers", PortSettings())
+            profile = manager.create_server("Interrupted backup")
+            backup_dir = Path(profile.server_dir) / "backups"
+
+            with patch("minecraft_server_creator.manager._add_backup_path", side_effect=KeyboardInterrupt):
+                with self.assertRaises(KeyboardInterrupt):
+                    manager.backup(profile.slug, progress=lambda _message: None)
+
+            self.assertEqual(list(backup_dir.glob("*.tar.gz")), [])
+
     def test_regenerate_world_backs_up_and_resets_all_dimensions_with_seed(self):
         with tempfile.TemporaryDirectory() as temp:
             manager = ServerManager(

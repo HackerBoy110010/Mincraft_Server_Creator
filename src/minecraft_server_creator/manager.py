@@ -9,8 +9,9 @@ import stat
 import tarfile
 from pathlib import Path
 import tempfile
+import time
 import uuid
-from typing import Callable
+from typing import BinaryIO, Callable, Iterator
 from urllib.parse import urlsplit
 
 from .config import AppConfig, ConfigStore, data_directory
@@ -36,6 +37,88 @@ from .systemd import SystemdUserService
 
 class ManagerError(RuntimeError):
     pass
+
+
+def _format_backup_size(value: float) -> str:
+    amount = float(value)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if amount < 1024 or unit == "TiB":
+            return f"{amount:.1f} {unit}" if unit != "B" else f"{int(amount)} B"
+        amount /= 1024
+    return f"{amount:.1f} TiB"
+
+
+def _iter_backup_paths(server_dir: Path) -> Iterator[Path]:
+    def visit(path: Path) -> Iterator[Path]:
+        yield path
+        if path.is_symlink() or not path.is_dir():
+            return
+        for child in sorted(path.iterdir(), key=lambda item: item.name):
+            yield from visit(child)
+
+    for child in sorted(server_dir.iterdir(), key=lambda item: item.name):
+        if child.name in {"backups", "logs"}:
+            continue
+        yield from visit(child)
+
+
+def _measure_backup(server_dir: Path, progress: Callable[[str], None] | None) -> tuple[int, int, int]:
+    total_bytes = 0
+    file_count = 0
+    entry_count = 0
+    seen_inodes: set[tuple[int, int]] = set()
+    last_report = time.monotonic()
+    for path in _iter_backup_paths(server_dir):
+        entry_count += 1
+        info = path.lstat()
+        if stat.S_ISREG(info.st_mode):
+            inode = (info.st_dev, info.st_ino)
+            if info.st_ino and info.st_nlink > 1 and inode in seen_inodes:
+                continue
+            if info.st_ino:
+                seen_inodes.add(inode)
+            total_bytes += info.st_size
+            file_count += 1
+        now = time.monotonic()
+        if progress and now - last_report >= 1.0:
+            relative = path.relative_to(server_dir).as_posix()
+            progress(f"Backup: Dateiliste wird ermittelt — {entry_count} Einträge geprüft; zuletzt {relative}")
+            last_report = now
+    return total_bytes, file_count, entry_count
+
+
+class _BackupProgressReader:
+    def __init__(self, stream: BinaryIO, on_read: Callable[[int], None]) -> None:
+        self.stream = stream
+        self.on_read = on_read
+
+    def read(self, size: int = -1) -> bytes:
+        chunk = self.stream.read(size)
+        if chunk:
+            self.on_read(len(chunk))
+        return chunk
+
+
+def _add_backup_path(
+    archive: tarfile.TarFile,
+    path: Path,
+    arcname: str,
+    on_entry: Callable[[str], None],
+    on_bytes: Callable[[str, int], None],
+) -> None:
+    info = archive.gettarinfo(str(path), arcname)
+    on_entry(arcname)
+    if info is None:
+        return
+    if info.isreg():
+        with path.open("rb") as stream:
+            reader = _BackupProgressReader(stream, lambda amount: on_bytes(arcname, amount))
+            archive.addfile(info, reader)
+        return
+    archive.addfile(info)
+    if info.isdir():
+        for child in sorted(path.iterdir(), key=lambda item: item.name):
+            _add_backup_path(archive, child, f"{arcname}/{child.name}", on_entry, on_bytes)
 
 
 class ServerManager:
@@ -690,7 +773,7 @@ class ServerManager:
             raise ManagerError(detail) from exc
         return world_name, backup_path
 
-    def backup(self, selector: str) -> Path:
+    def backup(self, selector: str, *, progress: Callable[[str], None] | None = None) -> Path:
         profile = self.get_profile(selector)
         if self.services.is_active(profile):
             raise ManagerError("Für ein konsistentes Backup muss der Server zuerst gestoppt werden.")
@@ -701,17 +784,107 @@ class ServerManager:
             os.chmod(backup_dir, 0o700)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f-UTC")
         archive_path = backup_dir / f"{profile.slug}-{stamp}.tar.gz"
+        archive_created = False
+        archive_complete = False
+
         try:
+            if progress:
+                progress("Vollständiges Backup: ermittle Umfang des Serverprofils (backups/ und logs/ ausgenommen) …")
+            total_bytes, file_count, entry_count = _measure_backup(server_dir, progress)
+            if progress:
+                progress(
+                    f"Vollständiges Backup: {file_count} Dateien, {entry_count} Einträge, "
+                    f"{_format_backup_size(total_bytes)} zu lesen; Komprimierung startet."
+                )
+
+            completed_bytes = 0
+            completed_entries = 0
+            current_member = "Vorbereitung"
+            started = time.monotonic()
+            last_report = started
+
+            def emit_progress(*, force: bool = False) -> None:
+                nonlocal last_report
+                if progress is None:
+                    return
+                now = time.monotonic()
+                if not force and now - last_report < 1.0:
+                    return
+                if total_bytes:
+                    percentage = min(100.0, completed_bytes * 100.0 / total_bytes)
+                elif entry_count:
+                    percentage = min(100.0, completed_entries * 100.0 / entry_count)
+                else:
+                    percentage = 100.0
+                elapsed = max(now - started, 0.001)
+                rate = completed_bytes / elapsed
+                progress(
+                    f"Backup-Fortschritt: {percentage:5.1f}% — "
+                    f"{_format_backup_size(completed_bytes)} / {_format_backup_size(total_bytes)}, "
+                    f"{_format_backup_size(rate)}/s; Einträge {completed_entries}/{entry_count}; "
+                    f"aktuell: {current_member}"
+                )
+                last_report = now
+
+            def on_entry(member: str) -> None:
+                nonlocal completed_entries, current_member
+                completed_entries += 1
+                current_member = member
+                emit_progress()
+
+            def on_bytes(member: str, amount: int) -> None:
+                nonlocal completed_bytes, current_member
+                completed_bytes += amount
+                current_member = member
+                emit_progress()
+
+            flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0)
+            descriptor = os.open(archive_path, flags, 0o600)
+            archive_created = True
+            os.close(descriptor)
             with tarfile.open(archive_path, "w:gz") as archive:
-                for child in server_dir.iterdir():
+                for child in sorted(server_dir.iterdir(), key=lambda item: item.name):
                     if child.name in {"backups", "logs"}:
                         continue
-                    archive.add(child, arcname=child.name)
+                    _add_backup_path(
+                        archive,
+                        child,
+                        child.name,
+                        on_entry,
+                        on_bytes,
+                    )
             if os.name != "nt":
                 os.chmod(archive_path, 0o600)
+            archive_complete = True
+            emit_progress(force=True)
+            if progress:
+                progress(
+                    f"Vollständiges Backup abgeschlossen: {archive_path} "
+                    f"({_format_backup_size(archive_path.stat().st_size)} komprimiert)."
+                )
+        except KeyboardInterrupt:
+            if archive_created and not archive_complete:
+                try:
+                    archive_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            if progress:
+                progress("Backup-Abbruch erkannt; eine unvollständige Archivdatei wurde entfernt, sofern vorhanden.")
+            raise
         except (OSError, tarfile.TarError) as exc:
-            archive_path.unlink(missing_ok=True)
+            if archive_created and not archive_complete:
+                try:
+                    archive_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
             raise ManagerError(f"Backup fehlgeschlagen: {exc}") from exc
+        except BaseException:
+            if archive_created and not archive_complete:
+                try:
+                    archive_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            raise
         return archive_path
 
     def set_memory(self, selector: str, memory_mb: int) -> ServerProfile:

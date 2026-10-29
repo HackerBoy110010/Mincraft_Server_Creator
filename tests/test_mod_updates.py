@@ -9,6 +9,7 @@ import tempfile
 import unittest
 import zipfile
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from minecraft_server_creator.catalog import ContentCatalog, InstallPlan
 from minecraft_server_creator.models import ServerProfile
@@ -141,8 +142,10 @@ class FakeManager:
         self.stops += 1
         self.services.active = False
 
-    def backup(self, selector):
+    def backup(self, selector, *, progress=None):
         self.backups += 1
+        if progress:
+            progress("test backup progress")
         return Path(tempfile.gettempdir()) / f"{selector}-test-full-backup.tar.gz"
 
 
@@ -214,6 +217,24 @@ class SafeModUpdaterTests(unittest.TestCase):
             manifest = json.loads((Path(profile.server_dir) / "config" / "catalog-installed.json").read_text(encoding="utf-8"))
             self.assertEqual([item["path"] for item in manifest["files"]], ["mods/alpha-1.0.jar", "mods/beta-1.0.jar"])
             self.assertFalse(manager.services.active)
+
+    def test_interrupt_during_full_backup_restores_initial_running_state(self):
+        with tempfile.TemporaryDirectory() as temp:
+            profile, manager, catalog, original, _unmanaged_path, _unmanaged_bytes = self._fixture(
+                Path(temp), active=True
+            )
+            updater = SafeModUpdater(manager, catalog, readiness_check=lambda *_args: (True, "Done"))
+            prepared = updater.prepare(profile)
+            with patch.object(manager, "backup", side_effect=KeyboardInterrupt):
+                with self.assertRaises(KeyboardInterrupt):
+                    updater.apply(profile, prepared, full_server_backup=True)
+
+            self.assertEqual(manager.stops, 1)
+            self.assertEqual(manager.starts, 1)
+            self.assertTrue(manager.services.active)
+            for project_id, filename in (("alpha", "alpha-1.0.jar"), ("beta", "beta-1.0.jar")):
+                self.assertEqual((Path(profile.server_dir) / "mods" / filename).read_bytes(), original[project_id])
+            self.assertFalse(list((Path(profile.server_dir) / "backups" / "mod-updates").glob("*/transaction.json")))
 
     def test_update_preserves_initial_running_state_and_can_make_full_backup(self):
         with tempfile.TemporaryDirectory() as temp:

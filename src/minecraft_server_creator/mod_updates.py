@@ -837,13 +837,15 @@ class SafeModUpdater:
             )
         try:
             if full_server_backup:
-                full_backup_path = self.manager.backup(profile.slug)
+                announce("Vollständiges Server-Backup wird erstellt; regelmäßige Fortschrittsmeldungen folgen.")
+                full_backup_path = self.manager.backup(profile.slug, progress=announce)
             transaction_id, transaction_dir, metadata = self._create_transaction(
                 profile,
                 prepared,
                 full_server_backup=full_backup_path,
             )
-        except Exception as exc:
+        except BaseException as exc:
+            # Ctrl+C during the pre-update backup must not strand an originally running server stopped.
             if was_running:
                 try:
                     ok, detail = self._start_checked(
