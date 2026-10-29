@@ -10,6 +10,7 @@ from .config import AppConfig, ConfigError, ConfigStore
 from .geyser import GeyserBetaOptInRequired, GeyserError
 from .manager import ManagerError, ServerManager
 from .minecraft import MinecraftDownloadError
+from .mod_updates import ModUpdateError, SafeModUpdater, mod_update_lock, tcp_listener_present
 from .models import ARCLIGHT_LOADER_FAMILIES, IMPLEMENTED_SERVER_TYPES, SERVER_TYPES, PortSettings, ValidationError, validate_port
 from .network import describe_endpoints, get_lan_ip, get_public_ip, port_available
 from .properties import PropertiesError, read_properties
@@ -353,7 +354,9 @@ def _install_catalog_project(
     version_id: str | None = None,
 ) -> None:
     profile = manager.get_profile(profile_slug)
-    if manager.services.is_active(profile):
+    if not manager.services.supported():
+        raise ManagerError("Katalogdateien können nur installiert werden, wenn MCSC den systemd-Serverstatus prüfen kann.")
+    if manager.services.is_active(profile) or tcp_listener_present(profile.ports.java_tcp):
         raise ManagerError("Stoppe den Server vor der Installation von Mods, Plugins oder Datapacks.")
     destination = catalog.destination(profile, kind)
     plan = catalog.prepare_install(
@@ -384,7 +387,10 @@ def _install_catalog_project(
         if not _yes_no("Diese Katalogdatei installieren?", default=False):
             print("Installation abgebrochen.")
             return
-    installed = catalog.install(plan, profile, allow_beta=include_beta)
+    with mod_update_lock(profile):
+        if manager.services.is_active(profile) or tcp_listener_present(profile.ports.java_tcp):
+            raise ManagerError("Der Server wurde während der Installation gestartet; Datei wurde nicht verändert.")
+        installed = catalog.install(plan, profile, allow_beta=include_beta)
     print(f"Installiert: {installed}")
 
 
@@ -429,6 +435,114 @@ def _catalog_command(manager: ServerManager, args: argparse.Namespace) -> None:
             include_beta=args.allow_beta,
             version_id=args.version_id,
         )
+
+
+def _mods_command(manager: ServerManager, args: argparse.Namespace) -> None:
+    profile = manager.get_profile(args.server)
+    catalog = ContentCatalog()
+    if args.mods_action == "install-clumps":
+        _install_catalog_project(
+            manager,
+            catalog,
+            profile.slug,
+            "modrinth",
+            "mod",
+            "Wnxd13zP",
+            assume_yes=args.yes,
+        )
+        return
+
+    updater = SafeModUpdater(manager, catalog)
+    if args.mods_action == "backups":
+        backups = updater.list_backups(profile)
+        if not backups:
+            print("Es gibt noch keine Mod-Update-Backups.")
+            return
+        for item in backups:
+            print(
+                f"- {item['transaction_id']} [{item['status']}] — {item['created_at']}"
+                + (f"; Server-Backup: {item['full_server_backup']}" if item["full_server_backup"] else "")
+            )
+        return
+
+    if args.mods_action == "rollback":
+        backups = updater.list_backups(profile)
+        latest = backups[0] if backups else None
+        if args.transaction_id:
+            transaction_id = args.transaction_id
+        elif latest is not None and latest["status"] in {"complete", "in_progress"}:
+            transaction_id = latest["transaction_id"]
+        else:
+            transaction_id = None
+        if transaction_id is None:
+            raise ModUpdateError(
+                "Das neueste Mod-Update hat keinen zurücksetzbaren Stand. "
+                "Wähle bei Bedarf eine ältere Transaktion ausdrücklich aus 'mcsc mods backups'."
+            )
+        if not args.yes:
+            if not sys.stdin.isatty():
+                raise ManagerError("Nichtinteraktives Mod-Rollback benötigt die ausdrückliche Option --yes.")
+            if not _yes_no(f"Die Mod-Dateien von Transaktion {transaction_id} zurücksetzen?", default=False):
+                print("Rollback abgebrochen.")
+                return
+        updater.rollback(profile, transaction_id=transaction_id)
+        print(f"Mod-Update {transaction_id} wurde zurückgesetzt. Der Server bleibt gestoppt.")
+        return
+
+    prepared = updater.prepare(profile, allow_beta=args.allow_beta)
+    if not prepared.candidates:
+        print("Es gibt keine neuen kompatiblen Mod-Versionen.")
+        for item in prepared.skipped:
+            print(f"- {item.title}: {item.status} — {item.detail}")
+        return
+
+    print(f"Geplante Einzelupdates für {profile.name} (Minecraft {profile.minecraft_version}):")
+    for candidate in prepared.candidates:
+        print(
+            f"- {candidate.plan.project_title}: "
+            f"{candidate.record.get('file_version', 'unbekannt')} → {candidate.plan.file_version}"
+        )
+    for item in prepared.skipped:
+        print(f"- {item.title}: {item.status} — {item.detail}")
+
+    create_full_backup = args.backup
+    if create_full_backup is None:
+        if not sys.stdin.isatty():
+            raise ManagerError("Nichtinteraktives Mod-Update benötigt --backup oder --no-backup.")
+        create_full_backup = _yes_no(
+            "Vorher ein vollständiges Server-Backup erstellen? Das kann je nach Weltgröße dauern und Speicherplatz benötigen.",
+            default=True,
+        )
+    if not args.yes:
+        if not sys.stdin.isatty():
+            raise ManagerError("Nichtinteraktives Mod-Update benötigt die ausdrückliche Option --yes.")
+        if not _yes_no(
+            f"{len(prepared.candidates)} Mod(s) einzeln ersetzen, nach jedem Update starten und prüfen?",
+            default=False,
+        ):
+            print("Mod-Update abgebrochen.")
+            return
+
+    report = updater.apply(
+        profile,
+        prepared,
+        startup_timeout=args.startup_timeout,
+        confirm_linger=_confirm_linger,
+        full_server_backup=bool(create_full_backup),
+        progress=lambda message: print(message, flush=True),
+    )
+    for item in report.outcomes:
+        print(f"- {item.title}: {item.status}" + (f" — {item.detail}" if item.detail else ""))
+    if report.backup_dir:
+        print(f"Rollback-Sicherung der verwalteten Mods: {report.backup_dir} (ID {report.transaction_id})")
+    if report.full_server_backup:
+        print(f"Vollständiges Server-Backup: {report.full_server_backup}")
+    reverted = [item for item in report.outcomes if item.status == "zurückgesetzt"]
+    if reverted:
+        print("Mindestens ein Mod-Update schlug fehl; die jeweilige alte Version wurde geprüft und der nächste Mod wurde fortgesetzt.")
+    if report.fatal_error:
+        raise ModUpdateError(report.fatal_error)
+    print("Mod-Update abgeschlossen.")
 
 
 def _resource_pack_command(manager: ServerManager, args: argparse.Namespace) -> None:
@@ -737,6 +851,27 @@ def build_parser() -> argparse.ArgumentParser:
     catalog_list = catalog_sub.add_parser("list", help="Kataloginstallationen eines Profils anzeigen")
     catalog_list.add_argument("server", help="Servername oder Profil-Slug")
 
+    mods = sub.add_parser("mods", help="Katalogverwaltete Mods sicher aktualisieren, zurücksetzen oder Clumps installieren")
+    mods_sub = mods.add_subparsers(dest="mods_action", required=True)
+    mods_clumps = mods_sub.add_parser("install-clumps", help="Kompatible Clumps-Version für dieses Profil installieren")
+    mods_clumps.add_argument("server", help="Servername oder Profil-Slug")
+    mods_clumps.add_argument("--yes", action="store_true", help="Installation ausdrücklich bestätigen")
+    mods_update = mods_sub.add_parser("update", help="Verwaltete Mods einzeln aktualisieren und nach jedem Start prüfen")
+    mods_update.add_argument("server", help="Servername oder Profil-Slug")
+    mods_update.add_argument("--allow-beta", action="store_true", help="Kompatible Beta-Versionen ausdrücklich zulassen")
+    mods_update.add_argument("--startup-timeout", type=int, default=180, help="Sekunden bis Minecraft 'Done' melden muss (30–1800)")
+    mods_update.add_argument("--yes", action="store_true", help="Mod-Updates ausdrücklich bestätigen")
+    mods_backup_group = mods_update.add_mutually_exclusive_group()
+    mods_backup_group.add_argument("--backup", dest="backup", action="store_true", help="Vorher vollständiges Server-Backup erstellen")
+    mods_backup_group.add_argument("--no-backup", dest="backup", action="store_false", help="Ohne vollständiges Server-Backup aktualisieren (Mod-Rollback bleibt verfügbar)")
+    mods_update.set_defaults(backup=None)
+    mods_rollback = mods_sub.add_parser("rollback", help="Letztes Mod-Update oder eine bestimmte Transaktion zurücksetzen")
+    mods_rollback.add_argument("server", help="Servername oder Profil-Slug")
+    mods_rollback.add_argument("transaction_id", nargs="?", help="Optionale Transaktions-ID aus 'mcsc mods backups'")
+    mods_rollback.add_argument("--yes", action="store_true", help="Rollback ausdrücklich bestätigen")
+    mods_backups = mods_sub.add_parser("backups", help="Mod-Update-Transaktionen und Sicherungen anzeigen")
+    mods_backups.add_argument("server", help="Servername oder Profil-Slug")
+
     resource_pack = sub.add_parser("resource-pack", help="Server-Ressourcenpaket in server.properties konfigurieren")
     resource_pack_sub = resource_pack.add_subparsers(dest="resource_pack_action", required=True)
     resource_pack_set = resource_pack_sub.add_parser("set", help="HTTPS-Ressourcenpaket setzen oder erzwingen")
@@ -808,6 +943,9 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "catalog":
             _ensure_setup(manager, store)
             _catalog_command(manager, args)
+        elif args.command == "mods":
+            _ensure_setup(manager, store)
+            _mods_command(manager, args)
         elif args.command == "resource-pack":
             _ensure_setup(manager, store)
             _resource_pack_command(manager, args)
@@ -870,6 +1008,7 @@ def main(argv: list[str] | None = None) -> int:
         CatalogError,
         GeyserError,
         ManagerError,
+        ModUpdateError,
         SystemdError,
         RuntimeErrorMCSC,
         MinecraftDownloadError,

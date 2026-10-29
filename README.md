@@ -21,6 +21,7 @@ SSH-freundlicher Minecraft-Server-Manager mit einfachem Python-Textmenü. Das Re
 - Online-Spielerliste und Live-Spielerdaten; Inventar lesen sowie einzelne Plätze bei Vanilla 1.17+ ändern
 - Mod-/Plugin-/Datapack-Suche und Installation aus Modrinth und CurseForge mit Minecraft-Version-/Loaderfiltern, Prüfsummen und getrennten Zielordnern; Datapacks landen in `<level-name>/datapacks/` (Standardwelt `world`)
 - Modrinth-Installationen können auf eine konkrete Versions-ID gepinnt werden; Beta-Dateien benötigen das ausdrückliche CLI-Opt-in `--allow-beta`
+- sicherer Updater für ausschließlich MCSC-katalogverwaltete Mods: einzeln aktualisieren, nach jedem Mod systemd und den Minecraft-Startmarker prüfen, bei Fehler automatisch zurücksetzen; Transaktions-Rollback bleibt verfügbar
 - HTTPS-Server-Ressourcenpakete mit validiertem SHA-1-Format konfigurieren und optional für alle beitretenden Spieler verpflichtend machen
 - Geyser-Fabric-Installation für reine Fabric-Profile auf der neuesten stabilen Minecraft-Version; passende stabile Fabric API wird automatisch ergänzt, Beta-Geyser nur nach ausdrücklichem Opt-in (`--allow-beta`)
 - Geyser-NetherNet-Konfiguration für den Profilport nach dem ersten Serverstart; die Portnummer gilt dabei für TCP und UDP
@@ -163,6 +164,40 @@ RCON wird standardmäßig nicht aktiviert. `mcsc rcon enable <server>` muss bei 
 `catalog install` wählt standardmäßig die neueste stabile passende JAR-Datei bzw. für Datapacks eine ZIP-Datei. Vor dem Download wird interaktiv um Bestätigung gebeten (nichtinteraktive Aufrufe benötigen `--yes`); verfügbare SHA-1/SHA-512/MD5-Prüfsummen werden geprüft und vorhandene Dateien nicht überschrieben. Datapack-ZIPs müssen `pack.mcmeta` mit einem erkennbaren Format-Eintrag direkt im ZIP-Stammverzeichnis enthalten. Der Server muss während der Installation gestoppt sein. MCSC führt selbst kein `/datapack enable` aus. Bei bestehenden Welten nach dem Start `/datapack list available` prüfen und, falls nötig, `/datapack enable file/<Dateiname>` ausführen. Bei einer neuen Welt Datapacks, die die Weltgenerierung ändern, nach einem Reset und vor dem ersten Serverstart installieren. Installationsdaten werden in `config/catalog-installed.json` vermerkt; `mcsc catalog list <server>` zeigt sie an.
 
 Bei Modrinth kann `--version-id <ID>` eine konkrete kompatible Version festpinnen; `--allow-beta` ist ein separates, ausdrücklich zu setzendes Opt-in für Beta-Dateien. Beide Optionen sind nur für Modrinth verfügbar. CurseForge verlangt einen offiziellen API-Schlüssel als Umgebungsvariable `CURSEFORGE_API_KEY`; der Schlüssel wird ausschließlich im Request-Header verwendet und nicht gespeichert. Die CurseForge-Data-Packs-Kategorie wird dynamisch über die Kategorien-API aufgelöst, eine Kategorie-ID ist nicht fest im Programm hinterlegt. Die CurseForge-API bietet keinen verlässlichen Server-/Client-Filter für Mods, daher sind Herstellerangaben zu prüfen. Erforderliche Projektabhängigkeiten werden angezeigt, aber nicht automatisch installiert. Bei Plugins sind ebenfalls die Herstellerangaben zur Kompatibilität zu prüfen; Paper-only-Dateien werden nicht als Bukkit-/Spigot-kompatibel vorausgesetzt.
+
+### Sichere Mod-Updates und Clumps
+
+`mcsc mods update <server>` prüft nur Mods, die im Katalogmanifest `config/catalog-installed.json` als `kind: mod` verzeichnet sind. Vorhandene JARs werden gegen ihre Installationsprüfsumme geprüft; nicht katalogverwaltete Mods, Plugins, Datapacks und manuell abgelegte Dateien werden nicht verändert. Der Updater erstellt vor Änderungen eine private Transaktionssicherung der verwalteten Mod-Dateien und des Manifests. Interaktiv fragt er zusätzlich standardmäßig nach einem vollständigen Server-Backup; nichtinteraktiv muss die Entscheidung ausdrücklich mit `--backup` oder `--no-backup` getroffen werden.
+
+Die Updates erfolgen einzeln: Nach jeder JAR wird der Server gestartet, systemd muss aktiv bleiben und `logs/latest.log` muss `Done (` melden. Schlägt ein Update fehl, wird nur diese Mod auf die gesicherte Datei und den vorherigen Manifeststand zurückgesetzt; dieser Stand wird ebenfalls gestartet und geprüft, bevor der Updater mit dem nächsten Mod fortfährt. Kann auch der Rollback-Stand nicht starten, werden alle Modänderungen der Transaktion zurückgesetzt und die Verarbeitung abgebrochen. Der Updater stellt am Ende den ursprünglichen Laufzustand wieder her: ein zuvor laufender Server läuft wieder, ein zuvor gestoppter Server bleibt gestoppt. Ein fehlgeschlagener Mod wird nicht automatisch bei jedem Aufruf erneut aktualisiert.
+
+```bash
+# Interaktiv: Backup-Entscheidung und Updatebestätigung werden abgefragt
+mcsc mods update eriks-server
+
+# Nichtinteraktiv: vollständiges Backup, Update und ausdrückliche Bestätigung
+mcsc mods update eriks-server --backup --yes
+
+# Explizit ohne vollständiges Server-Backup; Mod-Transaktionssicherung bleibt aktiv
+mcsc mods update eriks-server --no-backup --yes
+
+# Sicherungen ansehen und letztes Update (oder eine konkrete Transaktion) zurücksetzen
+mcsc mods backups eriks-server
+mcsc mods rollback eriks-server --yes
+mcsc mods rollback eriks-server TRANSAKTIONS_ID --yes
+```
+
+Ein manuelles Mod-Rollback erfordert einen gestoppten Server und bricht ab, wenn die aktualisierten Dateien oder das Katalogmanifest seit dem Update verändert wurden. Es stellt nur Mod-JARs und das Katalogmanifest wieder her, nicht Weltdateien. Ein optional erstelltes vollständiges Profil-Backup bleibt separat unter `backups/` erhalten; eine automatisierte Wiederherstellung vollständiger Server-Backups gibt es noch nicht.
+
+Clumps lässt sich über den vorhandenen Modrinth-Katalog installieren; MCSC wählt die neueste stabile Version, die zu Loader und Minecraft-Version des Profils passt:
+
+```bash
+mcsc mods install-clumps eriks-server
+# Nichtinteraktiv:
+mcsc mods install-clumps eriks-server --yes
+```
+
+Für Fabric und Minecraft 26.3 ist die passende stabile Clumps-Version 26.3.2 (Modrinth-Projekt `Wnxd13zP`). Das Projekt ist als Client-und-Server-Mod ausgewiesen; installiere bei Bedarf die passende Version auch in den Fabric-Clients.
 
 Ein erzwungenes Server-Ressourcenpaket lässt sich bei gestopptem Server mit einer direkten HTTPS-Datei-URL und dem dazugehörigen SHA-1-Hash setzen:
 
