@@ -199,8 +199,11 @@ class ContentCatalogTests(unittest.TestCase):
                 plan = catalog.prepare_install("modrinth", "mod", "abc123", profile)
             self.assertEqual(plan.file_version, "2.0.0")
             self.assertEqual(plan.required_dependencies, ("dependency1",))
+            def download_progress(_downloaded, _total):
+                pass
+
             with patch("minecraft_server_creator.catalog.download_file", side_effect=_write_zip) as download:
-                installed = catalog.install(plan, profile)
+                installed = catalog.install(plan, profile, progress=download_progress)
             self.assertEqual(installed, Path(profile.server_dir).resolve() / "mods" / "example-mod-2.0.0.jar")
             download.assert_called_once_with(
                 plan.download_url,
@@ -208,6 +211,7 @@ class ContentCatalogTests(unittest.TestCase):
                 checksum=checksum,
                 algorithm="sha512",
                 timeout=180.0,
+                progress=download_progress,
             )
             manifest = catalog.installed(profile)
             self.assertEqual(manifest[0]["project_id"], "abc123")

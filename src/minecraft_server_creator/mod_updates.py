@@ -325,6 +325,60 @@ def _record_identity(record: dict[str, Any]) -> tuple[str, str, str]:
     return (str(record.get("source", "")), str(record.get("project_id", "")), str(record.get("path", "")))
 
 
+def _progress_bar(percent: float, *, width: int = 20) -> str:
+    value = max(0.0, min(100.0, float(percent)))
+    filled = int(round(width * value / 100.0))
+    return f"[{'#' * filled}{'-' * (width - filled)}] {value:5.1f}%"
+
+
+def _indeterminate_progress_bar(tick: int, *, width: int = 20, segment: int = 4) -> str:
+    segment = max(1, min(width, segment))
+    travel = width - segment
+    cycle = max(1, 2 * travel)
+    position = max(0, int(tick)) % cycle
+    start = position if position <= travel else cycle - position
+    return f"[{'-' * start}{'#' * segment}{'-' * (width - start - segment)}]"
+
+
+def _format_progress_size(value: int) -> str:
+    amount = float(value)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if amount < 1024 or unit == "TiB":
+            return f"{amount:.1f} {unit}" if unit != "B" else f"{int(amount)} B"
+        amount /= 1024
+    return f"{amount:.1f} TiB"
+
+
+def _mod_progress_message(
+    index: int,
+    total: int,
+    title: str,
+    mod_percent: float,
+    phase: str,
+    phase_percent: float,
+) -> str:
+    overall = ((index - 1) + max(0.0, min(100.0, mod_percent)) / 100.0) * 100.0 / total
+    return (
+        f"Mod-Update {_progress_bar(overall)} — Mod {index}/{total}: {title}; "
+        f"{phase} {_progress_bar(phase_percent)}"
+    )
+
+
+def _startup_progress_callback(
+    announce: Callable[[str], None], label: str
+) -> Callable[[float, float], None]:
+    announce(f"{label} {_progress_bar(0)} — Minecraft-Startprüfung läuft.")
+
+    def report(elapsed: float, timeout: float) -> None:
+        percent = min(100.0, elapsed * 100.0 / timeout)
+        announce(
+            f"{label} {_progress_bar(percent)} — warte auf `Done (`; "
+            f"Timeout-Fortschritt {int(elapsed)}/{int(timeout)} s"
+        )
+
+    return report
+
+
 class SafeModUpdater:
     """Update only MCSC-managed mods, testing each candidate and reverting failures."""
 
@@ -343,7 +397,13 @@ class SafeModUpdater:
         self._sleep = sleep
         self._monotonic = monotonic
 
-    def prepare(self, profile: ServerProfile, *, allow_beta: bool = False) -> PreparedModUpdates:
+    def prepare(
+        self,
+        profile: ServerProfile,
+        *,
+        allow_beta: bool = False,
+        progress: Callable[[str], None] | None = None,
+    ) -> PreparedModUpdates:
         _, manifest_bytes, manifest = _read_manifest(profile)
         records = tuple(item for item in manifest["files"] if item.get("kind") == "mod")
         if not records:
@@ -359,10 +419,15 @@ class SafeModUpdater:
         seen_paths: set[str] = set()
         candidates: list[ModUpdateCandidate] = []
         skipped: list[ModUpdateOutcome] = []
-        for record in records:
+        for record_index, record in enumerate(records, start=1):
             source = str(record.get("source") or "")
             project_id = str(record.get("project_id") or "")
             title = str(record.get("project_title") or project_id or "Unbekannter Mod")
+            if progress:
+                progress(
+                    f"Update-Prüfung {_progress_bar((record_index - 1) * 100.0 / len(records))} "
+                    f"— Mod {record_index}/{len(records)}: {title}"
+                )
             old_version = str(record.get("file_version") or "unbekannt")
             old_relative = str(record.get("path") or "")
             identity = (source, project_id)
@@ -453,6 +518,11 @@ class SafeModUpdater:
         new_targets = [candidate.new_path for candidate in candidates]
         if len(new_targets) != len(set(new_targets)):
             raise ModUpdateError("Mehrere Updates würden dieselbe JAR-Datei erzeugen; es wurde nichts geändert.")
+        if progress:
+            progress(
+                f"Update-Prüfung {_progress_bar(100)} — {len(records)} katalogverwaltete Mods geprüft; "
+                f"{len(candidates)} Update(s) verfügbar."
+            )
         return PreparedModUpdates(
             profile.slug,
             manifest_bytes,
@@ -476,6 +546,7 @@ class SafeModUpdater:
         prepared: PreparedModUpdates,
         *,
         full_server_backup: Path | None,
+        progress: Callable[[str], None] | None = None,
     ) -> tuple[str, Path, dict[str, Any]]:
         root = Path(profile.server_dir).resolve()
         backup_dir = root / "backups"
@@ -501,8 +572,14 @@ class SafeModUpdater:
             if current_manifest != prepared.manifest_bytes:
                 raise ModUpdateError("Die Katalogliste änderte sich während der Update-Vorbereitung; starte den Update-Befehl erneut.")
             candidate_hashes = {candidate.old_path: candidate.old_sha256 for candidate in prepared.candidates}
-            for record in prepared.mod_records:
+            record_count = len(prepared.mod_records)
+            for record_index, record in enumerate(prepared.mod_records, start=1):
                 relative = str(record.get("path") or "")
+                if progress:
+                    progress(
+                        f"Rollback-Sicherung {_progress_bar((record_index - 1) * 100.0 / record_count)} "
+                        f"— Datei {record_index}/{record_count}: {relative}"
+                    )
                 source = _safe_mod_path(profile, relative)
                 before_hash = _sha256_file(source)
                 if relative in candidate_hashes and before_hash != candidate_hashes[relative]:
@@ -522,6 +599,11 @@ class SafeModUpdater:
                         "sha256": before_hash,
                     }
                 )
+                if progress:
+                    progress(
+                        f"Rollback-Sicherung {_progress_bar(record_index * 100.0 / record_count)} "
+                        f"— Datei {record_index}/{record_count} gesichert: {relative}"
+                    )
             if prepared.manifest_bytes is not None:
                 manifest_copy = transaction_dir / "catalog-installed.before.json"
                 manifest_copy.write_bytes(prepared.manifest_bytes)
@@ -563,11 +645,18 @@ class SafeModUpdater:
                 raise ModUpdateError("Die Katalogliste änderte sich während der Update-Vorbereitung; starte den Update-Befehl erneut.")
             _write_transaction(transaction_dir, metadata)
             return transaction_id, transaction_dir, metadata
-        except Exception:
+        except BaseException:
             shutil.rmtree(transaction_dir, ignore_errors=True)
             raise
 
-    def _replace_one(self, profile: ServerProfile, candidate: ModUpdateCandidate, transaction_dir: Path) -> Path:
+    def _replace_one(
+        self,
+        profile: ServerProfile,
+        candidate: ModUpdateCandidate,
+        transaction_dir: Path,
+        *,
+        download_progress: Callable[[int, int | None], None] | None = None,
+    ) -> Path:
         old_path = _safe_mod_path(profile, candidate.old_path)
         new_path = _safe_mod_path(profile, candidate.new_path, must_exist=False)
         if _sha256_file(old_path) != candidate.old_sha256:
@@ -591,10 +680,15 @@ class SafeModUpdater:
         old_path.unlink()
         ContentCatalog._write_manifest(manifest_path, manifest)
         try:
-            installed_path = self.catalog.install(candidate.plan, profile, allow_beta=candidate.plan.release_channel == "beta")
-        except Exception:
+            install_options: dict[str, Any] = {"allow_beta": candidate.plan.release_channel == "beta"}
+            if download_progress is not None:
+                install_options["progress"] = download_progress
+            installed_path = self.catalog.install(candidate.plan, profile, **install_options)
+        except BaseException:
             # The transaction snapshot is durable before any mutation, so restore the old JAR
-            # and manifest even if the download or checksum validation fails.
+            # and manifest even if a download error or Ctrl+C interrupts installation.
+            if candidate.new_path != candidate.old_path:
+                new_path.unlink(missing_ok=True)
             backup = _snapshot_path(transaction_dir, candidate.old_path)
             if (
                 backup.is_file()
@@ -650,7 +744,12 @@ class SafeModUpdater:
             return "(logs/latest.log ist nicht verfügbar)"
 
     def _wait_for_ready(
-        self, profile: ServerProfile, timeout: float, checkpoint: _LogCheckpoint | int
+        self,
+        profile: ServerProfile,
+        timeout: float,
+        checkpoint: _LogCheckpoint | int,
+        *,
+        progress: Callable[[float, float], None] | None = None,
     ) -> tuple[bool, str]:
         log_path = Path(profile.server_dir) / "logs" / "latest.log"
         if isinstance(checkpoint, int):
@@ -660,6 +759,8 @@ class SafeModUpdater:
         ready_at: float | None = None
         generation_checked = checkpoint.inode is None
         deadline = self._monotonic() + timeout
+        started = deadline - timeout
+        last_progress = started
         while self._monotonic() < deadline:
             if not self.manager.services.is_active(profile):
                 return False, "Der systemd-Dienst wurde beendet, bevor Minecraft startbereit war.\n" + self._log_tail(profile)
@@ -696,6 +797,11 @@ class SafeModUpdater:
             if ready_at is not None and self.manager.services.is_active(profile):
                 if self._monotonic() - ready_at >= 5.0:
                     return True, "Minecraft meldet Done und der Dienst blieb stabil."
+            if progress is not None:
+                now = self._monotonic()
+                if now - last_progress >= 5.0:
+                    progress(min(max(0.0, now - started), timeout), timeout)
+                    last_progress = now
             self._sleep(1.0)
         return False, f"Minecraft meldete innerhalb von {int(timeout)} s kein startbereites 'Done ('.\n{self._log_tail(profile)}"
 
@@ -705,12 +811,13 @@ class SafeModUpdater:
         *,
         startup_timeout: float,
         confirm_linger: Callable[[], bool],
+        progress: Callable[[float, float], None] | None = None,
     ) -> tuple[bool, str]:
         checkpoint = self._log_checkpoint(profile)
         self.manager.start(profile.slug, confirm_linger=confirm_linger)
         if self._readiness_check is not None:
             return self._readiness_check(profile, startup_timeout, checkpoint)
-        return self._wait_for_ready(profile, startup_timeout, checkpoint)
+        return self._wait_for_ready(profile, startup_timeout, checkpoint, progress=progress)
 
     def _stop_if_active(self, profile: ServerProfile) -> None:
         if self.manager.services.is_active(profile):
@@ -779,6 +886,48 @@ class SafeModUpdater:
             _copy_atomic(backup, targets[relative])
         _restore_manifest(manifest_path, original_manifest)
 
+    def _rollback_interrupted_update(
+        self,
+        profile: ServerProfile,
+        transaction_dir: Path,
+        metadata: dict[str, Any],
+        *,
+        was_running: bool,
+        startup_timeout: int,
+        confirm_linger: Callable[[], bool],
+        progress: Callable[[str], None],
+    ) -> None:
+        progress("Strg+C erkannt: sichere alle Mods zurück auf den Stand vor dieser Transaktion.")
+        self._stop_if_active(profile)
+        self._restore_snapshot(profile, transaction_dir, metadata)
+        metadata["status"] = "auto_rolled_back"
+        metadata["fatal_error"] = "Update durch Strg+C abgebrochen; alle Mod-Dateien und das Manifest wurden wiederhergestellt."
+        metadata["completed_at"] = datetime.now(timezone.utc).isoformat()
+        _write_transaction(transaction_dir, metadata)
+
+        if not was_running:
+            progress("Alle Mod-Dateien sind wiederhergestellt; der zuvor gestoppte Server bleibt gestoppt.")
+            return
+
+        startup_progress = _startup_progress_callback(progress, "Wiederhergestellter Serverstart")
+        try:
+            ready, detail = self._start_checked(
+                profile,
+                startup_timeout=startup_timeout,
+                confirm_linger=confirm_linger,
+                progress=startup_progress,
+            )
+        except Exception as exc:
+            self._stop_if_active(profile)
+            metadata["fatal_error"] += f" Der ursprüngliche Server konnte nicht gestartet werden: {exc}"
+            _write_transaction(transaction_dir, metadata)
+            raise ModUpdateError(metadata["fatal_error"]) from exc
+        if not ready:
+            self._stop_if_active(profile)
+            metadata["fatal_error"] += f" Der ursprüngliche Server startet nicht: {detail}"
+            _write_transaction(transaction_dir, metadata)
+            raise ModUpdateError(metadata["fatal_error"])
+        progress(f"Wiederhergestellter Serverstart {_progress_bar(100)} — Minecraft ist bereit.")
 
     def apply(
         self,
@@ -843,17 +992,24 @@ class SafeModUpdater:
                 profile,
                 prepared,
                 full_server_backup=full_backup_path,
+                progress=announce,
             )
+            announce(f"Rollback-Sicherung vollständig: Transaktion {transaction_id}.")
         except BaseException as exc:
             # Ctrl+C during the pre-update backup must not strand an originally running server stopped.
             if was_running:
                 try:
+                    start_progress = _startup_progress_callback(announce, "Serverstart nach Sicherungsfehler")
                     ok, detail = self._start_checked(
-                        profile, startup_timeout=startup_timeout, confirm_linger=confirm_linger
+                        profile,
+                        startup_timeout=startup_timeout,
+                        confirm_linger=confirm_linger,
+                        progress=start_progress,
                     )
                     if not ok:
                         self._stop_if_active(profile)
                         raise ModUpdateError(detail)
+                    announce(f"Serverstart nach Sicherungsfehler {_progress_bar(100)} — Minecraft ist bereit.")
                 except Exception as restart_error:
                     try:
                         self._stop_if_active(profile)
@@ -865,29 +1021,97 @@ class SafeModUpdater:
             raise
 
         report = ModUpdateReport(transaction_id, transaction_dir, full_backup_path, list(prepared.skipped), was_running)
-        for index, candidate in enumerate(prepared.candidates):
+        candidate_count = len(prepared.candidates)
+        for index, candidate in enumerate(prepared.candidates, start=1):
             title = candidate.plan.project_title
             old_version = str(candidate.record.get("file_version") or "unbekannt")
             new_version = candidate.plan.file_version
-            announce(f"[{index + 1}/{len(prepared.candidates)}] {title}: {old_version} → {new_version}")
+            announce(f"[{index}/{candidate_count}] {title}: {old_version} → {new_version}")
+
+            def emit_mod_progress(mod_percent: float, phase: str, phase_percent: float) -> None:
+                announce(
+                    _mod_progress_message(
+                        index,
+                        candidate_count,
+                        title,
+                        mod_percent,
+                        phase,
+                        phase_percent,
+                    )
+                )
+
+            emit_mod_progress(0, "Download wird vorbereitet", 0)
+            download_state = {"bucket": -1}
+
+            def download_progress(downloaded: int, total: int | None) -> None:
+                if total is not None and total > 0:
+                    percent = min(100.0, downloaded * 100.0 / total)
+                    bucket = int(percent // 5)
+                    if bucket == download_state["bucket"] and downloaded < total:
+                        return
+                    download_state["bucket"] = bucket
+                    detail = f"Download: {_format_progress_size(downloaded)} / {_format_progress_size(total)}"
+                    emit_mod_progress(10 + percent * 0.35, detail, percent)
+                    return
+
+                bucket = downloaded // (1024 * 1024)
+                if bucket == download_state["bucket"] and downloaded > 0:
+                    return
+                download_state["bucket"] = bucket
+                overall = ((index - 1) + 0.2) * 100.0 / candidate_count
+                announce(
+                    f"Mod-Update {_progress_bar(overall)} — Mod {index}/{candidate_count}: {title}; "
+                    f"Download {_indeterminate_progress_bar(bucket)} "
+                    f"{_format_progress_size(downloaded)} geladen (Gesamtgröße unbekannt)"
+                )
+
             _, manifest_before, _ = _read_manifest(profile)
-            item_meta = metadata["planned_updates"][index]
+            item_meta = metadata["planned_updates"][index - 1]
             try:
-                self._replace_one(profile, candidate, transaction_dir)
+                self._replace_one(
+                    profile,
+                    candidate,
+                    transaction_dir,
+                    download_progress=download_progress,
+                )
+                emit_mod_progress(45, "Datei heruntergeladen, geprüft und installiert", 100)
                 item_meta["status"] = "testing"
                 _write_transaction(transaction_dir, metadata)
+                emit_mod_progress(50, "Server wird gestartet; Prüfung auf `Done (` läuft", 0)
+
+                def startup_progress(elapsed: float, timeout: float) -> None:
+                    timeout_percent = min(100.0, elapsed * 100.0 / timeout)
+                    emit_mod_progress(
+                        50 + timeout_percent * 0.45,
+                        f"Startprüfung (Timeout) — warte auf `Done (`; {int(elapsed)}/{int(timeout)} s",
+                        timeout_percent,
+                    )
+
                 ready, detail = self._start_checked(
                     profile,
                     startup_timeout=startup_timeout,
                     confirm_linger=confirm_linger,
+                    progress=startup_progress,
                 )
                 if not ready:
                     raise ModUpdateError(detail)
                 self._stop_if_active(profile)
+                emit_mod_progress(100, "Serverstartprüfung erfolgreich", 100)
                 item_meta["status"] = "updated"
                 item_meta["detail"] = detail
                 report.outcomes.append(ModUpdateOutcome(title, old_version, new_version, "aktualisiert", detail))
                 announce(f"  OK: {title} startet mit der neuen Version.")
+            except KeyboardInterrupt:
+                self._rollback_interrupted_update(
+                    profile,
+                    transaction_dir,
+                    metadata,
+                    was_running=was_running,
+                    startup_timeout=startup_timeout,
+                    confirm_linger=confirm_linger,
+                    progress=announce,
+                )
+                raise
             except Exception as candidate_error:
                 try:
                     self._stop_if_active(profile)
@@ -896,18 +1120,35 @@ class SafeModUpdater:
                     item_meta["detail"] = str(candidate_error)
                     _write_transaction(transaction_dir, metadata)
                     announce(f"  FEHLER: {title} — alte Version wird wiederhergestellt und geprüft.")
+                    baseline_progress = _startup_progress_callback(
+                        announce,
+                        f"Rollback-Start Mod {index}/{candidate_count}",
+                    )
                     baseline_ready, baseline_detail = self._start_checked(
                         profile,
                         startup_timeout=startup_timeout,
                         confirm_linger=confirm_linger,
+                        progress=baseline_progress,
                     )
                     if not baseline_ready:
                         raise ModUpdateError(baseline_detail)
+                    announce(f"Rollback-Start Mod {index}/{candidate_count} {_progress_bar(100)} — Minecraft ist bereit.")
                     self._stop_if_active(profile)
                     report.outcomes.append(
                         ModUpdateOutcome(title, old_version, new_version, "zurückgesetzt", str(candidate_error))
                     )
                     announce(f"  Zurückgesetzt: {title}; Server läuft mit der alten Version.")
+                except KeyboardInterrupt:
+                    self._rollback_interrupted_update(
+                        profile,
+                        transaction_dir,
+                        metadata,
+                        was_running=was_running,
+                        startup_timeout=startup_timeout,
+                        confirm_linger=confirm_linger,
+                        progress=announce,
+                    )
+                    raise
                 except Exception as rollback_error:
                     self._stop_if_active(profile)
                     self._restore_snapshot(profile, transaction_dir, metadata)
@@ -922,14 +1163,35 @@ class SafeModUpdater:
                     )
                     if was_running:
                         try:
+                            restored_progress = _startup_progress_callback(
+                                announce,
+                                "Ursprünglicher Serverstart nach Gesamt-Rollback",
+                            )
                             restored_ready, restored_detail = self._start_checked(
                                 profile,
                                 startup_timeout=startup_timeout,
                                 confirm_linger=confirm_linger,
+                                progress=restored_progress,
                             )
                             if not restored_ready:
                                 report.fatal_error += f" Der ursprüngliche Server startet weiterhin nicht: {restored_detail}"
                                 self._stop_if_active(profile)
+                            else:
+                                announce(
+                                    "Ursprünglicher Serverstart nach Gesamt-Rollback "
+                                    f"{_progress_bar(100)} — Minecraft ist bereit."
+                                )
+                        except KeyboardInterrupt:
+                            self._rollback_interrupted_update(
+                                profile,
+                                transaction_dir,
+                                metadata,
+                                was_running=was_running,
+                                startup_timeout=startup_timeout,
+                                confirm_linger=confirm_linger,
+                                progress=announce,
+                            )
+                            raise
                         except Exception as start_error:
                             try:
                                 self._stop_if_active(profile)
@@ -941,13 +1203,27 @@ class SafeModUpdater:
 
         if was_running:
             try:
+                final_start_progress = _startup_progress_callback(announce, "Abschließender Serverstart")
                 final_ready, final_detail = self._start_checked(
                     profile,
                     startup_timeout=startup_timeout,
                     confirm_linger=confirm_linger,
+                    progress=final_start_progress,
                 )
                 if not final_ready:
                     raise ModUpdateError(final_detail)
+                announce(f"Abschließender Serverstart {_progress_bar(100)} — Minecraft ist bereit.")
+            except KeyboardInterrupt:
+                self._rollback_interrupted_update(
+                    profile,
+                    transaction_dir,
+                    metadata,
+                    was_running=was_running,
+                    startup_timeout=startup_timeout,
+                    confirm_linger=confirm_linger,
+                    progress=announce,
+                )
+                raise
             except Exception as final_error:
                 self._stop_if_active(profile)
                 self._restore_snapshot(profile, transaction_dir, metadata)
@@ -960,14 +1236,35 @@ class SafeModUpdater:
                     "Der abschließende Serverstart schlug fehl; alle Mod-Änderungen dieser Transaktion wurden zurückgesetzt."
                 )
                 try:
+                    old_start_progress = _startup_progress_callback(
+                        announce,
+                        "Serverstart mit vorherigem Mod-Stand",
+                    )
                     old_ready, old_detail = self._start_checked(
                         profile,
                         startup_timeout=startup_timeout,
                         confirm_linger=confirm_linger,
+                        progress=old_start_progress,
                     )
                     if not old_ready:
                         report.fatal_error += f" Der vorherige Mod-Stand startet ebenfalls nicht: {old_detail}"
                         self._stop_if_active(profile)
+                    else:
+                        announce(
+                            "Serverstart mit vorherigem Mod-Stand "
+                            f"{_progress_bar(100)} — Minecraft ist bereit."
+                        )
+                except KeyboardInterrupt:
+                    self._rollback_interrupted_update(
+                        profile,
+                        transaction_dir,
+                        metadata,
+                        was_running=was_running,
+                        startup_timeout=startup_timeout,
+                        confirm_linger=confirm_linger,
+                        progress=announce,
+                    )
+                    raise
                 except Exception as start_error:
                     try:
                         self._stop_if_active(profile)
@@ -980,19 +1277,41 @@ class SafeModUpdater:
             self._stop_if_active(profile)
             final_detail = "Server war vor dem Update gestoppt und bleibt gestoppt."
 
-        metadata["status"] = "complete"
-        metadata["completed_at"] = datetime.now(timezone.utc).isoformat()
-        metadata["final_manifest_sha256"] = (
-            _sha256_bytes(self._manifest_path(profile).read_bytes())
-            if self._manifest_path(profile).is_file()
-            else None
-        )
-        expected_hashes: dict[str, str | None] = {}
-        for relative in metadata["candidate_paths"]:
-            target = _safe_mod_path(profile, relative, must_exist=False)
-            expected_hashes[relative] = _sha256_file(target) if target.is_file() and not target.is_symlink() else None
-        metadata["candidate_file_hashes"] = expected_hashes
-        _write_transaction(transaction_dir, metadata)
+        try:
+            candidate_paths = metadata["candidate_paths"]
+            expected_hashes: dict[str, str | None] = {}
+            for hash_index, relative in enumerate(candidate_paths, start=1):
+                announce(
+                    f"Abschlussprüfung {_progress_bar((hash_index - 1) * 100.0 / len(candidate_paths))} "
+                    f"— Datei {hash_index}/{len(candidate_paths)}: {relative}"
+                )
+                target = _safe_mod_path(profile, relative, must_exist=False)
+                expected_hashes[relative] = (
+                    _sha256_file(target) if target.is_file() and not target.is_symlink() else None
+                )
+                announce(
+                    f"Abschlussprüfung {_progress_bar(hash_index * 100.0 / len(candidate_paths))} "
+                    f"— Datei {hash_index}/{len(candidate_paths)} geprüft: {relative}"
+                )
+            metadata["status"] = "complete"
+            metadata["completed_at"] = datetime.now(timezone.utc).isoformat()
+            manifest_path = self._manifest_path(profile)
+            metadata["final_manifest_sha256"] = (
+                _sha256_bytes(manifest_path.read_bytes()) if manifest_path.is_file() else None
+            )
+            metadata["candidate_file_hashes"] = expected_hashes
+            _write_transaction(transaction_dir, metadata)
+        except KeyboardInterrupt:
+            self._rollback_interrupted_update(
+                profile,
+                transaction_dir,
+                metadata,
+                was_running=was_running,
+                startup_timeout=startup_timeout,
+                confirm_linger=confirm_linger,
+                progress=announce,
+            )
+            raise
         if was_running:
             report.outcomes.append(ModUpdateOutcome("Server", "", "", "gestartet", final_detail))
         return report

@@ -102,10 +102,14 @@ class FakeCatalog:
         self.prepared.append(project_id)
         return self.plans[project_id]
 
-    def install(self, plan, profile, *, allow_beta=False):
+    def install(self, plan, profile, *, allow_beta=False, progress=None):
         self.installed.append(plan.project_id)
+        content = self.contents[plan.project_id]
+        if progress:
+            progress(0, len(content))
+            progress(len(content), len(content))
         target = Path(profile.server_dir) / "mods" / plan.file_name
-        target.write_bytes(self.contents[plan.project_id])
+        target.write_bytes(content)
         manifest_path = Path(profile.server_dir) / "config" / "catalog-installed.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         manifest["files"].append(
@@ -197,6 +201,21 @@ class SafeModUpdaterTests(unittest.TestCase):
             self.assertFalse(manager.services.active)
             self.assertIsNotNone(report.transaction_id)
 
+    def test_apply_reports_download_backup_and_startup_progress(self):
+        with tempfile.TemporaryDirectory() as temp:
+            profile, manager, catalog, _original, _unmanaged_path, _unmanaged_bytes = self._fixture(Path(temp))
+            updater = SafeModUpdater(manager, catalog, readiness_check=lambda *_args: (True, "Done"))
+            messages: list[str] = []
+            prepared = updater.prepare(profile, progress=messages.append)
+            updater.apply(profile, prepared, progress=messages.append)
+
+            self.assertTrue(any("Update-Prüfung" in message and "100.0%" in message for message in messages))
+            self.assertTrue(any("Rollback-Sicherung" in message for message in messages))
+            self.assertTrue(any("Download" in message and "MiB" not in message for message in messages))
+            self.assertTrue(any("Abschlussprüfung" in message for message in messages))
+            self.assertTrue(any("Server wird gestartet" in message for message in messages))
+            self.assertTrue(any("Serverstartprüfung erfolgreich" in message for message in messages))
+
     def test_manual_rollback_restores_only_updated_files_and_manifest(self):
         with tempfile.TemporaryDirectory() as temp:
             profile, manager, catalog, original, unmanaged_path, unmanaged_bytes = self._fixture(Path(temp))
@@ -235,6 +254,33 @@ class SafeModUpdaterTests(unittest.TestCase):
             for project_id, filename in (("alpha", "alpha-1.0.jar"), ("beta", "beta-1.0.jar")):
                 self.assertEqual((Path(profile.server_dir) / "mods" / filename).read_bytes(), original[project_id])
             self.assertFalse(list((Path(profile.server_dir) / "backups" / "mod-updates").glob("*/transaction.json")))
+
+    def test_interrupt_during_mod_install_rolls_back_and_restores_initial_running_state(self):
+        with tempfile.TemporaryDirectory() as temp:
+            profile, manager, catalog, original, _unmanaged_path, _unmanaged_bytes = self._fixture(
+                Path(temp), active=True
+            )
+            updater = SafeModUpdater(manager, catalog, readiness_check=lambda *_args: (True, "Done"))
+            prepared = updater.prepare(profile)
+
+            def interrupted_install(plan, install_profile, **_kwargs):
+                target = Path(install_profile.server_dir) / "mods" / plan.file_name
+                target.write_bytes(catalog.contents[plan.project_id])
+                raise KeyboardInterrupt
+
+            with patch.object(catalog, "install", side_effect=interrupted_install):
+                with self.assertRaises(KeyboardInterrupt):
+                    updater.apply(profile, prepared)
+
+            self.assertTrue(manager.services.active)
+            self.assertEqual(manager.starts, 1)
+            for project_id, filename in (("alpha", "alpha-1.0.jar"), ("beta", "beta-1.0.jar")):
+                self.assertEqual((Path(profile.server_dir) / "mods" / filename).read_bytes(), original[project_id])
+            self.assertFalse((Path(profile.server_dir) / "mods" / "alpha-2.0.jar").exists())
+            transaction_files = list((Path(profile.server_dir) / "backups" / "mod-updates").glob("*/transaction.json"))
+            self.assertEqual(len(transaction_files), 1)
+            metadata = json.loads(transaction_files[0].read_text(encoding="utf-8"))
+            self.assertEqual(metadata["status"], "auto_rolled_back")
 
     def test_update_preserves_initial_running_state_and_can_make_full_backup(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -314,10 +360,12 @@ class SafeModUpdaterTests(unittest.TestCase):
                         stream.write("[Server thread/INFO]: Done (2.0s)! For help, type \"help\"\n")
 
             updater = SafeModUpdater(manager, readiness_check=None, sleep=sleep, monotonic=lambda: clock[0])
-            ready, detail = updater._wait_for_ready(profile, 20, offset)
+            progress: list[tuple[float, float]] = []
+            ready, detail = updater._wait_for_ready(profile, 20, offset, progress=lambda elapsed, timeout: progress.append((elapsed, timeout)))
             self.assertTrue(ready)
             self.assertIn("Done", detail)
             self.assertGreaterEqual(clock[0], 6.0)
+            self.assertEqual(progress, [(5.0, 20)])
 
     def test_startup_check_detects_rewritten_log_even_if_it_grows_past_old_offset(self):
         with tempfile.TemporaryDirectory() as temp:

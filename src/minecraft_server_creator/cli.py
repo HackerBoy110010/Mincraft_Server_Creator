@@ -489,7 +489,12 @@ def _mods_command(manager: ServerManager, args: argparse.Namespace) -> None:
         print(f"Mod-Update {transaction_id} wurde zurückgesetzt. Der Server bleibt gestoppt.")
         return
 
-    prepared = updater.prepare(profile, allow_beta=args.allow_beta)
+    print("Prüfe katalogverwaltete Mods und verfügbare Versionen:", flush=True)
+    prepared = updater.prepare(
+        profile,
+        allow_beta=args.allow_beta,
+        progress=lambda message: print(message, flush=True),
+    )
     if not prepared.candidates:
         print("Es gibt keine neuen kompatiblen Mod-Versionen.")
         for item in prepared.skipped:

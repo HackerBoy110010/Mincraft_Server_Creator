@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 import re
 import tempfile
-from typing import Any
+from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
@@ -692,7 +692,14 @@ class ContentCatalog:
             return f"{_datapack_world_name(profile)}/datapacks"
         return "mods" if kind == "mod" else "plugins"
 
-    def install(self, plan: InstallPlan, profile: ServerProfile, *, allow_beta: bool = False) -> Path:
+    def install(
+        self,
+        plan: InstallPlan,
+        profile: ServerProfile,
+        *,
+        allow_beta: bool = False,
+        progress: Callable[[int, int | None], None] | None = None,
+    ) -> Path:
         if plan.minecraft_version != profile.minecraft_version:
             raise CatalogError("Die Installationsauswahl passt nicht mehr zur Minecraft-Version dieses Profils.")
         if plan.release_channel not in {"release", "beta"}:
@@ -754,7 +761,17 @@ class ContentCatalog:
             ]
             self._write_manifest(manifest_path, manifest)
         try:
-            download_file(download_url, target, checksum=digest, algorithm=algorithm, timeout=180.0)
+            if progress is None:
+                download_file(download_url, target, checksum=digest, algorithm=algorithm, timeout=180.0)
+            else:
+                download_file(
+                    download_url,
+                    target,
+                    checksum=digest,
+                    algorithm=algorithm,
+                    timeout=180.0,
+                    progress=progress,
+                )
             if not zipfile.is_zipfile(target):
                 raise CatalogError("Die heruntergeladene Datei ist kein gültiges JAR/ZIP-Archiv.")
             if plan.kind == "datapack":

@@ -32,6 +32,23 @@ class MinecraftMetadataTests(unittest.TestCase):
                 download_file("https://example.invalid/server.jar", target, checksum=digest, algorithm="sha1")
             self.assertEqual(target.read_bytes(), payload)
 
+    def test_download_reports_byte_progress(self):
+        payload = b"minecraft-server-jar"
+
+        class Response(io.BytesIO):
+            headers = {"Content-Length": str(len(payload))}
+
+        events: list[tuple[int, int | None]] = []
+        with tempfile.TemporaryDirectory() as temp:
+            target = Path(temp) / "server.jar"
+            with patch("minecraft_server_creator.minecraft.urlopen", return_value=Response(payload)):
+                download_file(
+                    "https://example.invalid/server.jar",
+                    target,
+                    progress=lambda downloaded, total: events.append((downloaded, total)),
+                )
+        self.assertEqual(events, [(0, len(payload)), (len(payload), len(payload))])
+
     def test_download_rejects_bad_checksum(self):
         with tempfile.TemporaryDirectory() as temp:
             target = Path(temp) / "server.jar"

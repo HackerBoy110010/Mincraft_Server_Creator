@@ -5,7 +5,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
-from typing import Any
+from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -39,6 +39,7 @@ def download_file(
     checksum: str | None = None,
     algorithm: str = "sha1",
     timeout: float = 60.0,
+    progress: Callable[[int, int | None], None] | None = None,
 ) -> Path:
     """Download a file atomically and verify its checksum when one is supplied."""
     if urlparse(url).scheme != "https":
@@ -52,13 +53,29 @@ def download_file(
         with tempfile.NamedTemporaryFile("wb", dir=dest.parent, prefix=f".{dest.name}.", suffix=".part", delete=False) as out:
             temp_path = Path(out.name)
             with urlopen(request, timeout=timeout) as response:
+                total_bytes: int | None = None
+                headers = getattr(response, "headers", None)
+                raw_length = headers.get("Content-Length") if headers is not None else None
+                if raw_length is not None:
+                    try:
+                        parsed_length = int(raw_length)
+                        if parsed_length >= 0:
+                            total_bytes = parsed_length
+                    except (TypeError, ValueError):
+                        pass
+                downloaded_bytes = 0
+                if progress:
+                    progress(downloaded_bytes, total_bytes)
                 while True:
                     chunk = response.read(1024 * 1024)
                     if not chunk:
                         break
                     out.write(chunk)
+                    downloaded_bytes += len(chunk)
                     if hasher:
                         hasher.update(chunk)
+                    if progress:
+                        progress(downloaded_bytes, total_bytes)
             out.flush()
             os.fsync(out.fileno())
         if hasher and hasher.hexdigest().lower() != str(checksum).lower():
