@@ -31,6 +31,7 @@ class PerformanceMod:
 class PlannedPerformanceMod:
     plan: InstallPlan
     is_dependency: bool = False
+    alpha_fallback: bool = False
 
 
 @dataclass(frozen=True)
@@ -200,7 +201,7 @@ def _existing_managed_main_mod(
         "project_id": spec.project_id,
         "file_name": path.name,
         "file_version": plan.file_version,
-        "release_channel": "release",
+        "release_channel": plan.release_channel,
         "minecraft_version": profile.minecraft_version,
         "loader": "fabric",
     }
@@ -255,11 +256,40 @@ def _recorded_unresolvable_dependencies(plan: InstallPlan) -> tuple[str, ...]:
     return tuple(item for item in plan.required_dependencies if item not in project_ids)
 
 
-def _require_safe_plan(plan: InstallPlan, *, context: str) -> None:
+def _prepare_stable_or_alpha(
+    catalog: ContentCatalog,
+    project_id: str,
+    profile: ServerProfile,
+    *,
+    context: str,
+) -> tuple[InstallPlan, bool]:
+    """Prefer a stable build; use alpha only when no compatible stable build exists."""
+    try:
+        return catalog.prepare_install("modrinth", "mod", project_id, profile), False
+    except NoCompatibleVersionError as stable_error:
+        try:
+            plan = catalog.prepare_install("modrinth", "mod", project_id, profile, include_alpha=True)
+        except NoCompatibleVersionError as alpha_error:
+            raise PerformancePackError(
+                f"{context} hat weder ein passendes stabiles noch ein passendes Alpha-Fabric-Release "
+                f"für Minecraft {profile.minecraft_version}. Das gesamte Performance-Paket wurde abgelehnt; "
+                f"es wurde nichts installiert. (Stabil: {stable_error}; Alpha: {alpha_error})"
+            ) from alpha_error
+        if plan.release_channel not in {"release", "alpha"}:
+            raise PerformancePackError(
+                f"{context}: die Fallback-Suche lieferte unerwartet den Kanal "
+                f"{plan.release_channel!r}; Beta-Dateien werden im Performance-Paket nicht verwendet."
+            )
+        return plan, plan.release_channel == "alpha"
+
+
+def _require_safe_plan(plan: InstallPlan, *, context: str, allow_alpha: bool = False) -> None:
     if plan.source != "modrinth" or plan.kind != "mod":
         raise PerformancePackError(f"{context}: erwartet wurde eine Modrinth-Mod-Datei.")
-    if plan.release_channel != "release":
-        raise PerformancePackError(f"{context}: nur stabile Releases sind im Performance-Paket erlaubt.")
+    if plan.release_channel != "release" and not (allow_alpha and plan.release_channel == "alpha"):
+        raise PerformancePackError(
+            f"{context}: erlaubt sind stabile Releases und Alpha ausschließlich als Fallback ohne passendes stabiles Release."
+        )
     if not _plan_is_server_only_or_client_optional(plan):
         raise PerformancePackError(
             f"{context}: Modrinth weist Client-Seite={plan.client_side or 'unbekannt'} und "
@@ -285,18 +315,18 @@ def prepare_performance_package(
     dependency_queue: list[str] = []
 
     for spec in PERFORMANCE_MODS:
-        try:
-            plan = catalog.prepare_install("modrinth", "mod", spec.project_id, profile)
-        except NoCompatibleVersionError as exc:
-            raise PerformancePackError(
-                f"{spec.name} hat kein passendes stabiles Fabric-Release für Minecraft "
-                f"{profile.minecraft_version}: {exc}. Das gesamte Performance-Paket wurde "
-                "abgelehnt; es wurde nichts installiert."
-            ) from exc
-        _require_safe_plan(plan, context=spec.name)
+        plan, alpha_fallback = _prepare_stable_or_alpha(
+            catalog,
+            spec.project_id,
+            profile,
+            context=spec.name,
+        )
+        _require_safe_plan(plan, context=spec.name, allow_alpha=alpha_fallback)
         existing_version = _existing_managed_main_mod(installed_records, profile, spec, plan)
         if existing_version is not None:
-            already_installed.append(f"{spec.name} {existing_version} (Datei und Katalogrelease geprüft)")
+            already_installed.append(
+                f"{spec.name} {existing_version} ({plan.release_channel}; Datei und Katalogrelease geprüft)"
+            )
             planned_project_ids.add(plan.project_id)
         elif _matches_mod_ids(spec.mod_ids, spec.mod_id_prefixes, installed_mod_ids):
             raise PerformancePackError(
@@ -305,7 +335,7 @@ def prepare_performance_package(
                 "abgelehnt; entferne oder aktualisiere den Konflikt erst nach einer Sicherung."
             )
         else:
-            planned.append(PlannedPerformanceMod(plan))
+            planned.append(PlannedPerformanceMod(plan, alpha_fallback=alpha_fallback))
             planned_project_ids.add(plan.project_id)
         unresolved = _recorded_unresolvable_dependencies(plan)
         if unresolved:
@@ -323,14 +353,17 @@ def prepare_performance_package(
         processed_dependencies.add(dependency_id)
         if dependency_id in planned_project_ids or dependency_id in managed_projects:
             continue
-        try:
-            dependency_plan = catalog.prepare_install("modrinth", "mod", dependency_id, profile)
-        except NoCompatibleVersionError as exc:
-            raise PerformancePackError(
-                f"Eine erforderliche Abhängigkeit ({dependency_id}) hat kein stabiles, passendes "
-                f"Fabric-Server-Release für Minecraft {profile.minecraft_version}: {exc}. Es wurde noch nichts installiert."
-            ) from exc
-        _require_safe_plan(dependency_plan, context=f"Erforderliche Abhängigkeit {dependency_plan.project_title}")
+        dependency_plan, dependency_alpha_fallback = _prepare_stable_or_alpha(
+            catalog,
+            dependency_id,
+            profile,
+            context=f"Erforderliche Abhängigkeit {dependency_id}",
+        )
+        _require_safe_plan(
+            dependency_plan,
+            context=f"Erforderliche Abhängigkeit {dependency_plan.project_title}",
+            allow_alpha=dependency_alpha_fallback,
+        )
         unresolved = _recorded_unresolvable_dependencies(dependency_plan)
         if unresolved:
             raise PerformancePackError(
@@ -341,7 +374,13 @@ def prepare_performance_package(
             managed_projects.add(dependency_plan.project_id)
             already_installed.append(f"Abhängigkeit {dependency_plan.project_title}")
             continue
-        planned.append(PlannedPerformanceMod(dependency_plan, is_dependency=True))
+        planned.append(
+            PlannedPerformanceMod(
+                dependency_plan,
+                is_dependency=True,
+                alpha_fallback=dependency_alpha_fallback,
+            )
+        )
         planned_project_ids.add(dependency_plan.project_id)
         dependency_queue.extend(dependency_plan.required_dependency_project_ids)
 
@@ -419,7 +458,11 @@ def install_performance_package(
         raise PerformancePackError("Der mods-Ordner liegt nicht sicher innerhalb des Serverprofils.")
     filenames: set[str] = set()
     for item in prepared.plans:
-        _require_safe_plan(item.plan, context=item.plan.project_title)
+        _require_safe_plan(
+            item.plan,
+            context=item.plan.project_title,
+            allow_alpha=item.alpha_fallback,
+        )
         key = item.plan.file_name.casefold()
         if key in filenames:
             raise PerformancePackError(f"Mehrere Paketmods würden dieselbe Datei installieren: {item.plan.file_name}")
@@ -439,7 +482,14 @@ def install_performance_package(
                 download_progress = lambda downloaded, expected, i=index, p=item.plan: progress(
                     i, total, p, downloaded, expected
                 )
-            installed.append(catalog.install(item.plan, profile, progress=download_progress))
+            installed.append(
+                catalog.install(
+                    item.plan,
+                    profile,
+                    allow_alpha=item.alpha_fallback,
+                    progress=download_progress,
+                )
+            )
     except BaseException as exc:
         cleanup_errors: list[str] = []
         for path in reversed(installed):

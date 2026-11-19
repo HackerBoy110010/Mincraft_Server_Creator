@@ -619,6 +619,71 @@ class ContentCatalogTests(unittest.TestCase):
         self.assertEqual(plan.file_version, "fabric-2.6.27+26.3")
         self.assertEqual(plan.release_channel, "beta")
 
+    def test_alpha_modrinth_fallback_is_separate_from_beta_opt_in(self):
+        project = {
+            "id": "alpha-project",
+            "slug": "alpha-project",
+            "title": "Alpha Project",
+            "project_type": "mod",
+            "client_side": "optional",
+            "server_side": "required",
+        }
+        versions = [
+            {
+                "id": "beta-version",
+                "version_number": "2.0-beta",
+                "version_type": "beta",
+                "status": "listed",
+                "environment": "client_and_server",
+                "loaders": ["fabric"],
+                "game_versions": ["26.3"],
+                "files": [{
+                    "filename": "alpha-project-beta.jar",
+                    "primary": True,
+                    "url": "https://cdn.modrinth.com/data/alpha-project/beta.jar",
+                    "hashes": {"sha512": "b" * 128},
+                }],
+            },
+            {
+                "id": "alpha-version",
+                "version_number": "2.0-alpha",
+                "version_type": "alpha",
+                "status": "listed",
+                "environment": "client_and_server",
+                "loaders": ["fabric"],
+                "game_versions": ["26.3"],
+                "files": [{
+                    "filename": "alpha-project-alpha.jar",
+                    "primary": True,
+                    "url": "https://cdn.modrinth.com/data/alpha-project/alpha.jar",
+                    "hashes": {"sha512": "a" * 128},
+                }],
+            },
+        ]
+        with tempfile.TemporaryDirectory() as temp:
+            profile = _profile(Path(temp))
+            profile.minecraft_version = "26.3"
+            catalog = ContentCatalog()
+            with patch("minecraft_server_creator.catalog._request_json", side_effect=[project, versions]):
+                with self.assertRaisesRegex(CatalogError, "Kanal: stabil"):
+                    catalog.prepare_install("modrinth", "mod", "alpha-project", profile)
+            with patch("minecraft_server_creator.catalog._request_json", side_effect=[project, versions]):
+                alpha_plan = catalog.prepare_install(
+                    "modrinth", "mod", "alpha-project", profile, include_alpha=True
+                )
+            self.assertEqual(alpha_plan.release_channel, "alpha")
+            with patch("minecraft_server_creator.catalog._request_json", side_effect=[project, versions]):
+                beta_plan = catalog.prepare_install(
+                    "modrinth", "mod", "alpha-project", profile, include_beta=True
+                )
+            self.assertEqual(beta_plan.release_channel, "beta")
+            with patch("minecraft_server_creator.catalog.download_file", side_effect=_write_zip):
+                with self.assertRaisesRegex(CatalogError, "allow_alpha=True"):
+                    catalog.install(alpha_plan, profile)
+                installed = catalog.install(alpha_plan, profile, allow_alpha=True)
+            self.assertTrue(installed.is_file())
+            self.assertEqual(catalog.installed(profile)[0]["release_channel"], "alpha")
+
     def test_beta_modrinth_build_requires_explicit_install_opt_in(self):
         checksum = "b" * 128
         project = {"id": "wKkoqHrH", "slug": "geyser", "title": "Geyser", "project_type": "mod"}

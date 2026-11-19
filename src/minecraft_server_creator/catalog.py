@@ -351,6 +351,7 @@ class ModrinthCatalog:
         profile: ServerProfile,
         *,
         include_beta: bool = False,
+        include_alpha: bool = False,
         version_id: str | None = None,
     ) -> InstallPlan:
         loaders = _allowed_profile_loader(profile, kind)
@@ -384,7 +385,11 @@ class ModrinthCatalog:
         versions = _request_json(versions_url, "api.modrinth.com")
         if not isinstance(versions, list):
             raise CatalogError("Modrinth lieferte eine ungültige Versionsliste.")
-        accepted_channels = {"release", "beta"} if include_beta else {"release"}
+        accepted_channels = {"release"}
+        if include_beta:
+            accepted_channels.add("beta")
+        if include_alpha:
+            accepted_channels.add("alpha")
         for version in versions:
             if not isinstance(version, dict) or version.get("version_type") not in accepted_channels:
                 continue
@@ -458,7 +463,12 @@ class ModrinthCatalog:
                 server_side.lower() if isinstance(server_side, str) else None,
                 dependency_project_ids,
             )
-        channel_message = "stabil oder Beta" if include_beta else "stabil"
+        channels = ["stabil"]
+        if include_beta:
+            channels.append("Beta")
+        if include_alpha:
+            channels.append("Alpha")
+        channel_message = " oder ".join(channels)
         version_message = f" mit Versions-ID {version_id}" if version_id is not None else ""
         raise NoCompatibleVersionError(
             f"Für {project_id}{version_message} wurde keine passende serverfähige {kind}-Version "
@@ -696,17 +706,19 @@ class ContentCatalog:
         profile: ServerProfile,
         *,
         include_beta: bool = False,
+        include_alpha: bool = False,
         version_id: str | None = None,
     ) -> InstallPlan:
         provider = self._provider(source)
-        if (include_beta or version_id is not None) and source != "modrinth":
-            raise CatalogError("Beta-Opt-in und feste Versions-IDs werden derzeit nur für Modrinth unterstützt.")
+        if (include_beta or include_alpha or version_id is not None) and source != "modrinth":
+            raise CatalogError("Prerelease-Opt-ins und feste Versions-IDs werden derzeit nur für Modrinth unterstützt.")
         if source == "modrinth":
             return provider.prepare_install(
                 project_id.strip(),
                 kind,
                 profile,
                 include_beta=include_beta,
+                include_alpha=include_alpha,
                 version_id=version_id,
             )
         return provider.prepare_install(project_id.strip(), kind, profile)
@@ -724,14 +736,17 @@ class ContentCatalog:
         profile: ServerProfile,
         *,
         allow_beta: bool = False,
+        allow_alpha: bool = False,
         progress: Callable[[int, int | None], None] | None = None,
     ) -> Path:
         if plan.minecraft_version != profile.minecraft_version:
             raise CatalogError("Die Installationsauswahl passt nicht mehr zur Minecraft-Version dieses Profils.")
-        if plan.release_channel not in {"release", "beta"}:
+        if plan.release_channel not in {"release", "beta", "alpha"}:
             raise CatalogError("Die Installationsauswahl enthält einen nicht unterstützten Veröffentlichungskanal.")
         if plan.release_channel == "beta" and not allow_beta:
             raise CatalogError("Beta-Dateien benötigen das ausdrückliche Opt-in allow_beta=True.")
+        if plan.release_channel == "alpha" and not allow_alpha:
+            raise CatalogError("Alpha-Dateien benötigen das ausdrückliche Opt-in allow_alpha=True.")
         _allowed_profile_loader(profile, plan.kind)
         if plan.source not in {"modrinth", "curseforge"}:
             raise CatalogError("Unbekannte Katalogquelle in der Installationsauswahl.")

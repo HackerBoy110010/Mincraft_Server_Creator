@@ -561,21 +561,26 @@ def _performance_command(manager: ServerManager, args: argparse.Namespace) -> No
         raise ManagerError(f"Stoppe den Server zuerst mit `mcsc stop {profile.slug}`.")
 
     catalog = ContentCatalog()
-    print("Prüfe stabile, serverfähige Modrinth-Releases und notwendige Abhängigkeiten:", flush=True)
+    print(
+        "Prüfe stabile, serverfähige Modrinth-Releases und notwendige Abhängigkeiten "
+        "(Alpha nur, wenn kein passendes stabiles Release existiert):",
+        flush=True,
+    )
     prepared = prepare_performance_package(catalog, profile)
     if prepared.already_installed:
         print("Bereits vorhanden und wird nicht überschrieben:")
         for name in prepared.already_installed:
             print(f"- {name}")
     if not prepared.plans:
-        print("Alle sechs Performance-Mods sind bereits als passende stabile, serverfähige Releases vorhanden; nichts zu installieren.")
+        print("Alle sechs Performance-Mods sind bereits als passende serverfähige Paket-Releases vorhanden; nichts zu installieren.")
         return
 
     print(f"Geplante Installation für {profile.name} (Minecraft {profile.minecraft_version}, Fabric):")
     for item in prepared.plans:
         dependency = " [erforderliche Abhängigkeit]" if item.is_dependency else ""
+        alpha = " [ALPHA-Fallback: keine passende stabile Version]" if item.alpha_fallback else ""
         print(
-            f"- {item.plan.project_title} {item.plan.file_version}"
+            f"- {item.plan.project_title} {item.plan.file_version}{alpha}"
             f" — Client-Seite: {item.plan.client_side}; Server-Seite: {item.plan.server_side}{dependency}"
         )
 

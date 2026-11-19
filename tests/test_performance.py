@@ -76,7 +76,7 @@ class PerformancePackTests(unittest.TestCase):
                     return []
 
                 @staticmethod
-                def prepare_install(_source, _kind, project_id, _profile):
+                def prepare_install(_source, _kind, project_id, _profile, *, include_alpha=False):
                     if project_id == PERFORMANCE_MODS[2].project_id:
                         raise NoCompatibleVersionError("no stable release")
                     return plans[project_id]
@@ -85,6 +85,67 @@ class PerformancePackTests(unittest.TestCase):
                 prepare_performance_package(FakeCatalog(), profile)
             self.assertIn("C2ME", str(raised.exception))
             self.assertIn("no stable release", str(raised.exception))
+            self.assertEqual(list((Path(profile.server_dir) / "mods").iterdir()), [])
+
+    def test_prepare_uses_alpha_only_when_no_stable_release_exists(self):
+        with tempfile.TemporaryDirectory() as temp:
+            profile = _profile(Path(temp))
+            plans = {
+                spec.project_id: _plan(profile, spec.project_id, slug=spec.name.lower(), title=spec.name)
+                for spec in PERFORMANCE_MODS
+            }
+            c2me_id = PERFORMANCE_MODS[2].project_id
+
+            class FakeCatalog:
+                @staticmethod
+                def installed(_profile):
+                    return []
+
+                @staticmethod
+                def prepare_install(_source, _kind, project_id, _profile, *, include_alpha=False):
+                    if project_id == c2me_id:
+                        if include_alpha:
+                            return replace(plans[project_id], release_channel="alpha")
+                        raise NoCompatibleVersionError("no stable release")
+                    if include_alpha:
+                        raise AssertionError("Alpha fallback must only be queried for missing stable releases")
+                    return plans[project_id]
+
+            prepared = prepare_performance_package(FakeCatalog(), profile)
+            c2me = next(item for item in prepared.plans if item.plan.project_id == c2me_id)
+            self.assertEqual(c2me.plan.release_channel, "alpha")
+            self.assertTrue(c2me.alpha_fallback)
+            self.assertTrue(all(item.plan.release_channel == "release" for item in prepared.plans if item is not c2me))
+            self.assertEqual(len(prepared.plans), len(PERFORMANCE_MODS))
+
+    def test_prepare_rejects_unsafe_alpha_fallback_for_entire_package(self):
+        with tempfile.TemporaryDirectory() as temp:
+            profile = _profile(Path(temp))
+            plans = {
+                spec.project_id: _plan(profile, spec.project_id, slug=spec.name.lower(), title=spec.name)
+                for spec in PERFORMANCE_MODS
+            }
+            c2me_id = PERFORMANCE_MODS[2].project_id
+
+            class FakeCatalog:
+                @staticmethod
+                def installed(_profile):
+                    return []
+
+                @staticmethod
+                def prepare_install(_source, _kind, project_id, _profile, *, include_alpha=False):
+                    if project_id == c2me_id and include_alpha:
+                        return replace(
+                            plans[project_id],
+                            release_channel="alpha",
+                            client_side="required",
+                        )
+                    if project_id == c2me_id:
+                        raise NoCompatibleVersionError("no stable release")
+                    return plans[project_id]
+
+            with self.assertRaisesRegex(PerformancePackError, "Client-Seite=required"):
+                prepare_performance_package(FakeCatalog(), profile)
             self.assertEqual(list((Path(profile.server_dir) / "mods").iterdir()), [])
 
     def test_prepare_rejects_client_required_mod_and_unsupported_server_profile(self):
@@ -237,9 +298,9 @@ class PerformancePackTests(unittest.TestCase):
             self.assertEqual(
                 set(prepared.already_installed),
                 {
-                    "Lithium 1.0.0 (Datei und Katalogrelease geprüft)",
-                    "FerriteCore 1.0.0 (Datei und Katalogrelease geprüft)",
-                    "Krypton 1.0.0 (Datei und Katalogrelease geprüft)",
+                    "Lithium 1.0.0 (release; Datei und Katalogrelease geprüft)",
+                    "FerriteCore 1.0.0 (release; Datei und Katalogrelease geprüft)",
+                    "Krypton 1.0.0 (release; Datei und Katalogrelease geprüft)",
                 },
             )
             self.assertEqual(
@@ -294,6 +355,26 @@ class PerformancePackTests(unittest.TestCase):
             self.assertFalse((Path(profile.server_dir) / "mods" / "first.jar").exists())
             self.assertFalse((Path(profile.server_dir) / "mods" / "second.jar").exists())
             self.assertFalse((Path(profile.server_dir) / "config" / "catalog-installed.json").exists())
+
+    def test_install_allows_alpha_only_for_preflighted_fallback(self):
+        with tempfile.TemporaryDirectory() as temp:
+            profile = _profile(Path(temp))
+            plan = replace(_plan(profile, "alpha-project", filename="alpha-project.jar"), release_channel="alpha")
+            package = PreparedPerformancePackage(
+                (PlannedPerformanceMod(plan, alpha_fallback=True),),
+                (),
+            )
+
+            class FakeCatalog:
+                def install(self, install_plan, _profile, **kwargs):
+                    if install_plan.release_channel == "alpha":
+                        assert kwargs["allow_alpha"] is True
+                    target = Path(profile.server_dir) / "mods" / install_plan.file_name
+                    target.write_bytes(b"installed")
+                    return target
+
+            installed = install_performance_package(FakeCatalog(), profile, package)
+            self.assertEqual([path.name for path in installed], ["alpha-project.jar"])
 
     def test_install_refuses_existing_target_before_downloading(self):
         with tempfile.TemporaryDirectory() as temp:
