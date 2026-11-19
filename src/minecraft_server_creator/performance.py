@@ -19,6 +19,10 @@ class PerformancePackError(CatalogError):
     """Raised when the curated Fabric performance pack cannot be installed safely."""
 
 
+class PerformanceReleaseUnavailable(PerformancePackError):
+    """Raised when a project has neither a compatible stable nor alpha release."""
+
+
 @dataclass(frozen=True)
 class PerformanceMod:
     name: str
@@ -35,9 +39,16 @@ class PlannedPerformanceMod:
 
 
 @dataclass(frozen=True)
+class UnavailablePerformanceMod:
+    name: str
+    reason: str
+
+
+@dataclass(frozen=True)
 class PreparedPerformancePackage:
     plans: tuple[PlannedPerformanceMod, ...]
     already_installed: tuple[str, ...]
+    unavailable: tuple[UnavailablePerformanceMod, ...] = ()
 
 
 # Modrinth project IDs are stable. Version selection is intentionally dynamic,
@@ -270,10 +281,9 @@ def _prepare_stable_or_alpha(
         try:
             plan = catalog.prepare_install("modrinth", "mod", project_id, profile, include_alpha=True)
         except NoCompatibleVersionError as alpha_error:
-            raise PerformancePackError(
+            raise PerformanceReleaseUnavailable(
                 f"{context} hat weder ein passendes stabiles noch ein passendes Alpha-Fabric-Release "
-                f"für Minecraft {profile.minecraft_version}. Das gesamte Performance-Paket wurde abgelehnt; "
-                f"es wurde nichts installiert. (Stabil: {stable_error}; Alpha: {alpha_error})"
+                f"für Minecraft {profile.minecraft_version} (Stabil: {stable_error}; Alpha: {alpha_error})"
             ) from alpha_error
         if plan.release_channel not in {"release", "alpha"}:
             raise PerformancePackError(
@@ -301,8 +311,10 @@ def _require_safe_plan(plan: InstallPlan, *, context: str, allow_alpha: bool = F
 def prepare_performance_package(
     catalog: ContentCatalog,
     profile: ServerProfile,
+    *,
+    allow_partial: bool = False,
 ) -> PreparedPerformancePackage:
-    """Resolve stable server-safe Fabric mods and their required dependencies."""
+    """Resolve the package; optionally defer unavailable primary mods for explicit partial installs."""
     if profile.server_type != "fabric":
         raise PerformancePackError("Das Performance-Paket ist ausschließlich für reine Fabric-Serverprofile vorgesehen.")
 
@@ -311,16 +323,34 @@ def prepare_performance_package(
     installed_mod_ids = _installed_fabric_mod_ids(profile)
     planned: list[PlannedPerformanceMod] = []
     already_installed: list[str] = []
+    unavailable: list[UnavailablePerformanceMod] = []
     planned_project_ids: set[str] = set()
     dependency_queue: list[str] = []
 
     for spec in PERFORMANCE_MODS:
-        plan, alpha_fallback = _prepare_stable_or_alpha(
-            catalog,
-            spec.project_id,
-            profile,
-            context=spec.name,
-        )
+        try:
+            plan, alpha_fallback = _prepare_stable_or_alpha(
+                catalog,
+                spec.project_id,
+                profile,
+                context=spec.name,
+            )
+        except PerformanceReleaseUnavailable as exc:
+            if spec.project_id in managed_projects or _matches_mod_ids(
+                spec.mod_ids,
+                spec.mod_id_prefixes,
+                installed_mod_ids,
+            ):
+                raise PerformancePackError(
+                    f"{spec.name} ist bereits vorhanden, kann aber mangels passendem stabilem oder Alpha-Release "
+                    "nicht sicher als Teilpaket verifiziert werden. Das Performance-Paket wurde vor Änderungen abgelehnt."
+                ) from exc
+            if not allow_partial:
+                raise PerformancePackError(
+                    f"{exc}. Das gesamte Performance-Paket wurde abgelehnt; es wurde nichts installiert."
+                ) from exc
+            unavailable.append(UnavailablePerformanceMod(spec.name, str(exc)))
+            continue
         _require_safe_plan(plan, context=spec.name, allow_alpha=alpha_fallback)
         existing_version = _existing_managed_main_mod(installed_records, profile, spec, plan)
         if existing_version is not None:
@@ -401,7 +431,7 @@ def prepare_performance_package(
                 "Prüfe zuerst die vorhandene Mod-Version."
             )
 
-    return PreparedPerformancePackage(tuple(planned), tuple(already_installed))
+    return PreparedPerformancePackage(tuple(planned), tuple(already_installed), tuple(unavailable))
 
 
 def _snapshot_manifest(profile: ServerProfile) -> tuple[Path, Path, bytes | None]:

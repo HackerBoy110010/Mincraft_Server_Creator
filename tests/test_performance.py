@@ -14,6 +14,7 @@ from minecraft_server_creator.models import ServerProfile
 from minecraft_server_creator.performance import (
     PERFORMANCE_MODS,
     PerformancePackError,
+    PerformanceReleaseUnavailable,
     PreparedPerformancePackage,
     PlannedPerformanceMod,
     install_performance_package,
@@ -86,6 +87,60 @@ class PerformancePackTests(unittest.TestCase):
             self.assertIn("C2ME", str(raised.exception))
             self.assertIn("no stable release", str(raised.exception))
             self.assertEqual(list((Path(profile.server_dir) / "mods").iterdir()), [])
+
+    def test_prepare_allows_partial_only_when_explicitly_requested(self):
+        with tempfile.TemporaryDirectory() as temp:
+            profile = _profile(Path(temp))
+            plans = {
+                spec.project_id: _plan(profile, spec.project_id, slug=spec.name.lower(), title=spec.name)
+                for spec in PERFORMANCE_MODS
+            }
+            missing_id = PERFORMANCE_MODS[4].project_id
+
+            class FakeCatalog:
+                @staticmethod
+                def installed(_profile):
+                    return []
+
+                @staticmethod
+                def prepare_install(_source, _kind, project_id, _profile, *, include_alpha=False):
+                    if project_id == missing_id:
+                        raise NoCompatibleVersionError("no stable or alpha release")
+                    return plans[project_id]
+
+            prepared = prepare_performance_package(FakeCatalog(), profile, allow_partial=True)
+            self.assertEqual(len(prepared.plans), len(PERFORMANCE_MODS) - 1)
+            self.assertEqual([item.name for item in prepared.unavailable], ["ModernFix"])
+            self.assertIn("no stable or alpha release", prepared.unavailable[0].reason)
+            self.assertEqual(list((Path(profile.server_dir) / "mods").iterdir()), [])
+
+    def test_partial_mode_does_not_skip_an_unverified_existing_mod(self):
+        with tempfile.TemporaryDirectory() as temp:
+            profile = _profile(Path(temp))
+            lithium_path = Path(profile.server_dir) / "mods" / "lithium-local.jar"
+            with zipfile.ZipFile(lithium_path, "w") as archive:
+                archive.writestr("fabric.mod.json", '{"id":"lithium","version":"local"}')
+            plans = {
+                spec.project_id: _plan(profile, spec.project_id, slug=spec.name.lower(), title=spec.name)
+                for spec in PERFORMANCE_MODS
+            }
+            lithium_id = PERFORMANCE_MODS[0].project_id
+
+            class FakeCatalog:
+                @staticmethod
+                def installed(_profile):
+                    return []
+
+                @staticmethod
+                def prepare_install(_source, _kind, project_id, _profile, *, include_alpha=False):
+                    if project_id == lithium_id:
+                        raise NoCompatibleVersionError("no stable or alpha version")
+                    return plans[project_id]
+
+            with self.assertRaisesRegex(PerformancePackError, "bereits vorhanden"):
+                prepare_performance_package(FakeCatalog(), profile, allow_partial=True)
+            self.assertTrue(lithium_path.is_file())
+            self.assertEqual(len(list((Path(profile.server_dir) / "mods").iterdir())), 1)
 
     def test_prepare_uses_alpha_only_when_no_stable_release_exists(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -173,6 +228,8 @@ class PerformancePackTests(unittest.TestCase):
 
             with self.assertRaisesRegex(PerformancePackError, "Client-Seite=required"):
                 prepare_performance_package(FakeCatalog(), profile)
+            with self.assertRaisesRegex(PerformancePackError, "Client-Seite=required"):
+                prepare_performance_package(FakeCatalog(), profile, allow_partial=True)
             self.assertEqual(list((Path(profile.server_dir) / "mods").iterdir()), [])
 
             forge_profile = _profile(Path(temp) / "forge", server_type="forge")
@@ -213,6 +270,37 @@ class PerformancePackTests(unittest.TestCase):
             }
             self.assertEqual(main_project_ids, {spec.project_id for spec in PERFORMANCE_MODS})
 
+    def test_partial_mode_still_rejects_unavailable_required_dependencies(self):
+        with tempfile.TemporaryDirectory() as temp:
+            profile = _profile(Path(temp))
+            dependency_id = "missing-required-dependency"
+            plans = {
+                spec.project_id: _plan(
+                    profile,
+                    spec.project_id,
+                    slug=spec.name.lower(),
+                    title=spec.name,
+                    dependencies=(dependency_id,) if spec.name == "Lithium" else (),
+                    dependency_ids=(dependency_id,) if spec.name == "Lithium" else (),
+                )
+                for spec in PERFORMANCE_MODS
+            }
+
+            class FakeCatalog:
+                @staticmethod
+                def installed(_profile):
+                    return []
+
+                @staticmethod
+                def prepare_install(_source, _kind, project_id, _profile, *, include_alpha=False):
+                    if project_id == dependency_id:
+                        raise NoCompatibleVersionError("missing required dependency")
+                    return plans[project_id]
+
+            with self.assertRaisesRegex(PerformanceReleaseUnavailable, "Abhängigkeit"):
+                prepare_performance_package(FakeCatalog(), profile, allow_partial=True)
+            self.assertEqual(list((Path(profile.server_dir) / "mods").iterdir()), [])
+
     def test_prepare_aborts_if_required_dependency_is_not_server_safe(self):
         with tempfile.TemporaryDirectory() as temp:
             profile = _profile(Path(temp))
@@ -247,6 +335,8 @@ class PerformancePackTests(unittest.TestCase):
 
             with self.assertRaisesRegex(PerformancePackError, "Spieler sie möglicherweise ebenfalls benötigen"):
                 prepare_performance_package(FakeCatalog(), profile)
+            with self.assertRaisesRegex(PerformancePackError, "Spieler sie möglicherweise ebenfalls benötigen"):
+                prepare_performance_package(FakeCatalog(), profile, allow_partial=True)
 
     def test_prepare_reuses_verified_catalog_managed_main_mods(self):
         with tempfile.TemporaryDirectory() as temp:

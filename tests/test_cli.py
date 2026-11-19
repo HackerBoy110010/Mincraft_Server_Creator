@@ -1,8 +1,10 @@
+from contextlib import nullcontext
+from pathlib import Path
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from minecraft_server_creator.cli import _mods_command, _world_regenerate_command, build_parser, main
+from minecraft_server_creator.cli import _mods_command, _performance_command, _world_regenerate_command, build_parser, main
 from minecraft_server_creator.manager import ManagerError
 
 
@@ -190,12 +192,123 @@ class CliParserTests(unittest.TestCase):
         self.assertTrue(args.yes)
 
     def test_performance_install_arguments(self):
-        args = build_parser().parse_args(["performance", "install", "eriks-server", "--backup", "--yes"])
+        args = build_parser().parse_args([
+            "performance", "install", "eriks-server", "--allow-partial", "--backup", "--yes"
+        ])
         self.assertEqual(args.command, "performance")
         self.assertEqual(args.performance_action, "install")
         self.assertEqual(args.server, "eriks-server")
         self.assertTrue(args.backup)
         self.assertTrue(args.yes)
+        self.assertTrue(args.allow_partial)
+
+    @staticmethod
+    def _performance_cli_fakes():
+        profile = SimpleNamespace(
+            server_type="fabric",
+            name="Home",
+            slug="home",
+            minecraft_version="1.21.1",
+            server_dir="/tmp/mcsc-performance-test",
+            ports=SimpleNamespace(java_tcp=25565),
+        )
+        services = SimpleNamespace(supported=lambda: True, is_active=lambda _profile: False)
+        manager = SimpleNamespace(get_profile=lambda _selector: profile, services=services)
+        plan = SimpleNamespace(
+            project_title="Lithium",
+            file_version="1.0.0",
+            client_side="optional",
+            server_side="required",
+        )
+        prepared = SimpleNamespace(
+            plans=(SimpleNamespace(plan=plan, is_dependency=False, alpha_fallback=False),),
+            already_installed=(),
+            unavailable=(SimpleNamespace(name="ModernFix", reason="no matching release"),),
+        )
+        return manager, profile, prepared
+
+    def test_performance_partial_install_requires_opt_in_when_noninteractive(self):
+        manager, profile, prepared = self._performance_cli_fakes()
+        catalog = object()
+        args = build_parser().parse_args(
+            ["performance", "install", "home", "--no-backup", "--yes"]
+        )
+        with patch("minecraft_server_creator.cli.ContentCatalog", return_value=catalog), patch(
+            "minecraft_server_creator.cli.prepare_performance_package", return_value=prepared
+        ) as prepare, patch(
+            "minecraft_server_creator.cli.install_performance_package"
+        ) as install, patch(
+            "minecraft_server_creator.cli.tcp_listener_present", return_value=False
+        ), patch("minecraft_server_creator.cli.sys.stdin", SimpleNamespace(isatty=lambda: False)):
+            with self.assertRaisesRegex(ManagerError, "benötigt --allow-partial"):
+                _performance_command(manager, args)
+
+        prepare.assert_called_once_with(catalog, profile, allow_partial=True)
+        install.assert_not_called()
+
+    def test_performance_interactive_user_can_approve_partial_install(self):
+        manager, profile, prepared = self._performance_cli_fakes()
+        catalog = object()
+        args = build_parser().parse_args(
+            ["performance", "install", "home", "--no-backup"]
+        )
+        with patch("minecraft_server_creator.cli.ContentCatalog", return_value=catalog), patch(
+            "minecraft_server_creator.cli.prepare_performance_package", return_value=prepared
+        ), patch(
+            "minecraft_server_creator.cli.install_performance_package", return_value=[]
+        ) as install, patch(
+            "minecraft_server_creator.cli.tcp_listener_present", return_value=False
+        ), patch(
+            "minecraft_server_creator.cli.mod_update_lock", return_value=nullcontext()
+        ), patch("minecraft_server_creator.cli.sys.stdin", SimpleNamespace(isatty=lambda: True)), patch(
+            "minecraft_server_creator.cli._yes_no", side_effect=[True, True]
+        ) as ask:
+            _performance_command(manager, args)
+
+        self.assertEqual(ask.call_count, 2)
+        self.assertIn("Fehlende Mods auslassen", ask.call_args_list[0].args[0])
+        self.assertIn("installieren", ask.call_args_list[1].args[0])
+        self.assertTrue(all(call.kwargs["default"] is False for call in ask.call_args_list))
+        self.assertEqual(install.call_args.args, (catalog, profile, prepared))
+
+    def test_performance_interactive_decline_leaves_files_untouched(self):
+        manager, _profile, prepared = self._performance_cli_fakes()
+        catalog = object()
+        args = build_parser().parse_args(
+            ["performance", "install", "home", "--no-backup", "--yes"]
+        )
+        with patch("minecraft_server_creator.cli.ContentCatalog", return_value=catalog), patch(
+            "minecraft_server_creator.cli.prepare_performance_package", return_value=prepared
+        ), patch(
+            "minecraft_server_creator.cli.install_performance_package"
+        ) as install, patch(
+            "minecraft_server_creator.cli.tcp_listener_present", return_value=False
+        ), patch("minecraft_server_creator.cli.sys.stdin", SimpleNamespace(isatty=lambda: True)), patch(
+            "minecraft_server_creator.cli._yes_no", return_value=False
+        ) as ask:
+            _performance_command(manager, args)
+
+        ask.assert_called_once()
+        install.assert_not_called()
+
+    def test_performance_allow_partial_flag_is_noninteractive_opt_in(self):
+        manager, profile, prepared = self._performance_cli_fakes()
+        catalog = object()
+        args = build_parser().parse_args(
+            ["performance", "install", "home", "--allow-partial", "--no-backup", "--yes"]
+        )
+        with patch("minecraft_server_creator.cli.ContentCatalog", return_value=catalog), patch(
+            "minecraft_server_creator.cli.prepare_performance_package", return_value=prepared
+        ), patch(
+            "minecraft_server_creator.cli.install_performance_package", return_value=[]
+        ) as install, patch(
+            "minecraft_server_creator.cli.tcp_listener_present", return_value=False
+        ), patch(
+            "minecraft_server_creator.cli.mod_update_lock", return_value=nullcontext()
+        ), patch("minecraft_server_creator.cli.sys.stdin", SimpleNamespace(isatty=lambda: False)):
+            _performance_command(manager, args)
+
+        self.assertEqual(install.call_args.args, (catalog, profile, prepared))
 
     def test_help_parser_has_expected_commands(self):
         parser = build_parser()

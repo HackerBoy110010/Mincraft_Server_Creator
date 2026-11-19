@@ -566,13 +566,20 @@ def _performance_command(manager: ServerManager, args: argparse.Namespace) -> No
         "(Alpha nur, wenn kein passendes stabiles Release existiert):",
         flush=True,
     )
-    prepared = prepare_performance_package(catalog, profile)
+    prepared = prepare_performance_package(catalog, profile, allow_partial=True)
     if prepared.already_installed:
         print("Bereits vorhanden und wird nicht überschrieben:")
         for name in prepared.already_installed:
             print(f"- {name}")
+    if prepared.unavailable:
+        print("Kein passendes stabiles oder Alpha-Release gefunden:")
+        for item in prepared.unavailable:
+            print(f"- {item.name}: {item.reason}")
     if not prepared.plans:
-        print("Alle sechs Performance-Mods sind bereits als passende serverfähige Paket-Releases vorhanden; nichts zu installieren.")
+        if prepared.unavailable:
+            print("Es gibt keine kompatiblen neuen Mod-Dateien zu installieren; Dateien blieben unverändert.")
+        else:
+            print("Alle sechs Performance-Mods sind bereits als passende serverfähige Paket-Releases vorhanden; nichts zu installieren.")
         return
 
     print(f"Geplante Installation für {profile.name} (Minecraft {profile.minecraft_version}, Fabric):")
@@ -583,6 +590,18 @@ def _performance_command(manager: ServerManager, args: argparse.Namespace) -> No
             f"- {item.plan.project_title} {item.plan.file_version}{alpha}"
             f" — Client-Seite: {item.plan.client_side}; Server-Seite: {item.plan.server_side}{dependency}"
         )
+
+    if prepared.unavailable and not args.allow_partial:
+        if not sys.stdin.isatty():
+            raise ManagerError(
+                "Nichtinteraktive Performance-Installation mit fehlenden Mods benötigt --allow-partial."
+            )
+        if not _yes_no(
+            "Fehlende Mods auslassen und nur die oben geplanten sicheren Mods installieren?",
+            default=False,
+        ):
+            print("Performance-Installation abgebrochen; es wurden keine Dateien geändert.")
+            return
 
     create_backup = args.backup
     if create_backup is None:
@@ -595,10 +614,16 @@ def _performance_command(manager: ServerManager, args: argparse.Namespace) -> No
     if not args.yes:
         if not sys.stdin.isatty():
             raise ManagerError("Nichtinteraktive Performance-Installation benötigt die ausdrückliche Option --yes.")
-        if not _yes_no(
-            f"{len(prepared.plans)} Mod-Datei(en) als Performance-Paket installieren? Der Server bleibt anschließend gestoppt.",
-            default=False,
-        ):
+        confirmation = (
+            f"{len(prepared.plans)} Mod-Datei(en) als Performance-Paket installieren? "
+            "Der Server bleibt anschließend gestoppt."
+        )
+        if prepared.unavailable:
+            confirmation = (
+                f"Nur die {len(prepared.plans)} geplanten Mod-Dateien installieren und "
+                f"{len(prepared.unavailable)} nicht verfügbare Mods auslassen? Der Server bleibt anschließend gestoppt."
+            )
+        if not _yes_no(confirmation, default=False):
             print("Performance-Installation abgebrochen; es wurden keine Dateien geändert.")
             return
 
@@ -981,6 +1006,11 @@ def build_parser() -> argparse.ArgumentParser:
         "install", help="Stabile, serverfähige Performance-Mods als ein Paket installieren"
     )
     performance_install.add_argument("server", help="Name oder Profil-Slug eines Fabric-Servers")
+    performance_install.add_argument(
+        "--allow-partial",
+        action="store_true",
+        help="Paketmods ohne passendes stabiles oder Alpha-Release überspringen",
+    )
     performance_install.add_argument("--yes", action="store_true", help="Paketinstallation ausdrücklich bestätigen")
     performance_backup_group = performance_install.add_mutually_exclusive_group()
     performance_backup_group.add_argument(
