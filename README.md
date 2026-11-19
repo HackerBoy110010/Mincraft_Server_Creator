@@ -22,12 +22,13 @@ SSH-freundlicher Minecraft-Server-Manager mit einfachem Python-Textmenü. Das Re
 - Mod-/Plugin-/Datapack-Suche und Installation aus Modrinth und CurseForge mit Minecraft-Version-/Loaderfiltern, Prüfsummen und getrennten Zielordnern; Datapacks landen in `<level-name>/datapacks/` (Standardwelt `world`)
 - Modrinth-Installationen können auf eine konkrete Versions-ID gepinnt werden; Beta-Dateien benötigen das ausdrückliche CLI-Opt-in `--allow-beta`
 - sicherer Updater für ausschließlich MCSC-katalogverwaltete Mods: einzeln aktualisieren, nach jedem Mod systemd und den Minecraft-Startmarker prüfen, bei Fehler automatisch zurücksetzen; Transaktions-Rollback bleibt verfügbar
+- ein Fabric-Performance-Paket mit einem Befehl: prüft pro Mod die Minecraft-/Fabric-Kompatibilität und Modrinth-Seitenmetadaten; installiert nur stabile Releases, die serverfähig sind und keine Client-Installation voraussetzen; fehlende erforderliche, ebenfalls sichere Abhängigkeiten werden mit aufgenommen
 - HTTPS-Server-Ressourcenpakete mit validiertem SHA-1-Format konfigurieren und optional für alle beitretenden Spieler verpflichtend machen
 - Geyser-Fabric-Installation für reine Fabric-Profile auf der neuesten stabilen Minecraft-Version; passende stabile Fabric API wird automatisch ergänzt, Beta-Geyser nur nach ausdrücklichem Opt-in (`--allow-beta`)
 - Geyser-NetherNet-Konfiguration für den Profilport nach dem ersten Serverstart; die Portnummer gilt dabei für TCP und UDP
 - Python-Quellinstallation und interaktives Terminalmenü
 
-**Noch nicht implementiert:** automatische Firewallregeln und Backup-Wiederherstellung. Der CurseForge-Katalog benötigt einen API-Schlüssel in `CURSEFORGE_API_KEY`; er wird nicht in der Serverkonfiguration gespeichert. Katalogabhängigkeiten werden angezeigt, aber nicht automatisch installiert. Plugins können nur für Arclight ausgewählt werden; Modrinth-Ergebnisse werden auf Bukkit-/Spigot-Dateien gefiltert. CurseForge kann Paper-only-Dateien nicht sicher herausfiltern. Da Arclight keine Paper-only-Kompatibilität dokumentiert, prüfe vor dem Start die Herstellerangaben. RCON ist nur für Vanilla eingebunden und im echten Minecraft-Serverbetrieb noch nicht live getestet; Inventarzugriff betrifft ausschließlich online befindliche Spieler. Die Vanilla-, Fabric-, Forge-, NeoForge- und Arclight-Installer sowie Katalogfunktionen sind unit-getestet, aber echte Downloads und Serverstarts noch nicht live verifiziert. Forge/NeoForge führen den offiziellen Installer bei der Profilerstellung mit der passend verwalteten Temurin-JRE aus. Arclight verlangt die explizite Basis-Auswahl `fabric`, `forge` oder `neoforge`. Nicht unterstützte oder nicht kompatible Loader-Builds werden abgelehnt.
+**Noch nicht implementiert:** automatische Firewallregeln und Backup-Wiederherstellung. Der CurseForge-Katalog benötigt einen API-Schlüssel in `CURSEFORGE_API_KEY`; er wird nicht in der Serverkonfiguration gespeichert. Normale Kataloginstallationen zeigen Abhängigkeiten an, installieren sie aber nicht automatisch; nur das Performance-Paket löst notwendige Modrinth-Abhängigkeiten auf, sofern auch diese stabil, serverfähig und clientseitig optional sind. Plugins können nur für Arclight ausgewählt werden; Modrinth-Ergebnisse werden auf Bukkit-/Spigot-Dateien gefiltert. CurseForge kann Paper-only-Dateien nicht sicher herausfiltern. Da Arclight keine Paper-only-Kompatibilität dokumentiert, prüfe vor dem Start die Herstellerangaben. RCON ist nur für Vanilla eingebunden und im echten Minecraft-Serverbetrieb noch nicht live getestet; Inventarzugriff betrifft ausschließlich online befindliche Spieler. Die Vanilla-, Fabric-, Forge-, NeoForge- und Arclight-Installer sowie Katalogfunktionen sind unit-getestet, aber echte Downloads und Serverstarts noch nicht live verifiziert. Forge/NeoForge führen den offiziellen Installer bei der Profilerstellung mit der passend verwalteten Temurin-JRE aus. Arclight verlangt die explizite Basis-Auswahl `fabric`, `forge` oder `neoforge`. Nicht unterstützte oder nicht kompatible Loader-Builds werden abgelehnt.
 
 ## Voraussetzungen
 
@@ -201,6 +202,26 @@ mcsc mods install-clumps eriks-server --yes
 ```
 
 Für Fabric und Minecraft 26.3 ist die passende stabile Clumps-Version 26.3.2 (Modrinth-Projekt `Wnxd13zP`). Das Projekt ist als Client-und-Server-Mod ausgewiesen; installiere bei Bedarf die passende Version auch in den Fabric-Clients.
+
+### Fabric-Performance-Paket
+
+Mit einem Befehl kannst du Lithium, FerriteCore, C2ME, Krypton, ModernFix und Chunky für ein reines Fabric-Serverprofil installieren:
+
+```bash
+mcsc performance install eriks-server
+```
+
+Der Server muss dafür bereits gestoppt sein. MCSC prüft zuerst alle sechs Mods und ihre nötigen Abhängigkeiten. Interaktiv zeigt es danach den vollständigen Installationsplan, fragt standardmäßig nach einem vollständigen Server-Backup (mit sichtbarem Fortschritt) und bestätigt anschließend die Installation. Nichtinteraktiv musst du Backup-Entscheidung und Zustimmung angeben:
+
+```bash
+mcsc performance install eriks-server --backup --yes
+# Oder ausdrücklich ohne vollständiges Backup:
+mcsc performance install eriks-server --no-backup --yes
+```
+
+MCSC wählt ausschließlich stabile Modrinth-Releases für die Minecraft-Version und Fabric-Version des Profils. Es prüft die Modrinth-Metadaten und installiert nur Dateien, deren Server-Seite unterstützt wird und deren Client-Seite `optional` oder `unsupported` ist. Fehlende erforderliche Abhängigkeiten werden nur ergänzt, wenn auch sie stabil, serverfähig und ohne Pflichtinstallation bei Spielern sind. **Alle sechs Mods müssen gleichzeitig passen:** Fehlt für auch nur einen Mod ein stabiles, passendes Release oder sind die sicheren Seitenangaben unklar, wird das gesamte Paket vor jeder Dateiänderung abgelehnt. Beta-/Alpha-Dateien werden nicht automatisch angenommen. Ist einer der sechs Hauptmods bereits vorhanden, wird das Paket ebenfalls vollständig abgelehnt, statt nur die übrigen Mods nachzuinstallieren; vorhandene Mod-Dateien werden nie überschrieben. Bei einem Downloadfehler räumt MCSC die im Paket bereits installierten Dateien zurück.
+
+Das Paket startet den Server nach der Installation nicht automatisch; danach kannst du `mcsc start eriks-server` ausführen. Chunky wird nur installiert — eine Welt wird nicht automatisch vorab generiert. Das Paket verspricht keinen festen Leistungs- oder RAM-Gewinn; den Effekt solltest du auf dem jeweiligen Mod-/Weltstand prüfen.
 
 Ein erzwungenes Server-Ressourcenpaket lässt sich bei gestopptem Server mit einer direkten HTTPS-Datei-URL und dem dazugehörigen SHA-1-Hash setzen:
 

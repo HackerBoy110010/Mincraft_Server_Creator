@@ -5,13 +5,14 @@ from pathlib import Path
 import shlex
 import sys
 
-from .catalog import CatalogError, ContentCatalog
+from .catalog import CatalogError, ContentCatalog, InstallPlan
 from .config import AppConfig, ConfigError, ConfigStore
 from .geyser import GeyserBetaOptInRequired, GeyserError
 from .manager import ManagerError, ServerManager
 from .minecraft import MinecraftDownloadError
 from .mod_updates import ModUpdateError, SafeModUpdater, mod_update_lock, tcp_listener_present
 from .models import ARCLIGHT_LOADER_FAMILIES, IMPLEMENTED_SERVER_TYPES, SERVER_TYPES, PortSettings, ValidationError, validate_port
+from .performance import install_performance_package, prepare_performance_package
 from .network import describe_endpoints, get_lan_ip, get_public_ip, port_available
 from .properties import PropertiesError, read_properties
 from .rcon import inventory_editing_disabled_reason
@@ -550,6 +551,95 @@ def _mods_command(manager: ServerManager, args: argparse.Namespace) -> None:
     print("Mod-Update abgeschlossen.")
 
 
+def _performance_command(manager: ServerManager, args: argparse.Namespace) -> None:
+    profile = manager.get_profile(args.server)
+    if profile.server_type != "fabric":
+        raise CatalogError("Das Performance-Paket ist nur für reine Fabric-Serverprofile verfügbar.")
+    if not manager.services.supported():
+        raise ManagerError("Das Performance-Paket benötigt MCSC mit systemd-Statusprüfung.")
+    if manager.services.is_active(profile) or tcp_listener_present(profile.ports.java_tcp):
+        raise ManagerError(f"Stoppe den Server zuerst mit `mcsc stop {profile.slug}`.")
+
+    catalog = ContentCatalog()
+    print("Prüfe stabile, serverfähige Modrinth-Releases und notwendige Abhängigkeiten:", flush=True)
+    prepared = prepare_performance_package(catalog, profile)
+    if prepared.already_installed:
+        print("Bereits vorhanden, wird nicht überschrieben:")
+        for name in prepared.already_installed:
+            print(f"- {name}")
+    if not prepared.plans:
+        print("Es gibt keine passenden stabilen Performance-Mods zu installieren; Serverdateien blieben unverändert.")
+        return
+
+    print(f"Geplante Installation für {profile.name} (Minecraft {profile.minecraft_version}, Fabric):")
+    for item in prepared.plans:
+        dependency = " [erforderliche Abhängigkeit]" if item.is_dependency else ""
+        print(
+            f"- {item.plan.project_title} {item.plan.file_version}"
+            f" — Client-Seite: {item.plan.client_side}; Server-Seite: {item.plan.server_side}{dependency}"
+        )
+
+    create_backup = args.backup
+    if create_backup is None:
+        if not sys.stdin.isatty():
+            raise ManagerError("Nichtinteraktive Performance-Installation benötigt --backup oder --no-backup.")
+        create_backup = _yes_no(
+            "Vorher ein vollständiges Server-Backup erstellen? Das kann je nach Weltgröße dauern und Speicherplatz benötigen.",
+            default=True,
+        )
+    if not args.yes:
+        if not sys.stdin.isatty():
+            raise ManagerError("Nichtinteraktive Performance-Installation benötigt die ausdrückliche Option --yes.")
+        if not _yes_no(
+            f"{len(prepared.plans)} Mod-Datei(en) als Performance-Paket installieren? Der Server bleibt anschließend gestoppt.",
+            default=False,
+        ):
+            print("Performance-Installation abgebrochen; es wurden keine Dateien geändert.")
+            return
+
+    def report_download(index: int, total: int, plan: InstallPlan, downloaded: int, expected: int | None) -> None:
+        state = download_states.setdefault(index, -1)
+        if expected is not None and expected > 0:
+            percent = min(100, int(downloaded * 100 / expected))
+            bucket = percent // 5
+            if bucket != state and (downloaded == 0 or percent == 100 or bucket > state):
+                download_states[index] = bucket
+                print(
+                    f"Performance-Paket [{index}/{total}] {plan.project_title}: "
+                    f"Download {percent}% ({downloaded}/{expected} Bytes)",
+                    flush=True,
+                )
+        else:
+            bucket = downloaded // (1024 * 1024)
+            if bucket != state:
+                download_states[index] = bucket
+                print(
+                    f"Performance-Paket [{index}/{total}] {plan.project_title}: "
+                    f"{downloaded / (1024 * 1024):.1f} MiB geladen (Dateigröße unbekannt)",
+                    flush=True,
+                )
+
+    download_states: dict[int, int] = {}
+    with mod_update_lock(profile):
+        if manager.services.is_active(profile) or tcp_listener_present(profile.ports.java_tcp):
+            raise ManagerError("Der Server wurde während der Vorbereitung gestartet; Performance-Mods wurden nicht verändert.")
+        if create_backup:
+            backup = manager.backup(
+                profile.slug,
+                progress=lambda message: print(message, flush=True),
+            )
+            print(f"Vollständiges Server-Backup: {backup}")
+        installed = install_performance_package(
+            catalog,
+            profile,
+            prepared,
+            progress=report_download,
+        )
+    for path in installed:
+        print(f"Installiert: {path.name}")
+    print(f"Performance-Paket installiert. Der Server bleibt gestoppt; Start mit `mcsc start {profile.slug}`.")
+
+
 def _resource_pack_command(manager: ServerManager, args: argparse.Namespace) -> None:
     properties_path = manager.configure_resource_pack(
         args.server,
@@ -880,6 +970,22 @@ def build_parser() -> argparse.ArgumentParser:
     mods_backups = mods_sub.add_parser("backups", help="Mod-Update-Transaktionen und Sicherungen anzeigen")
     mods_backups.add_argument("server", help="Servername oder Profil-Slug")
 
+    performance = sub.add_parser("performance", help="Serverseitige Performance-Mods für Fabric installieren")
+    performance_sub = performance.add_subparsers(dest="performance_action", required=True)
+    performance_install = performance_sub.add_parser(
+        "install", help="Stabile, serverfähige Performance-Mods als ein Paket installieren"
+    )
+    performance_install.add_argument("server", help="Name oder Profil-Slug eines Fabric-Servers")
+    performance_install.add_argument("--yes", action="store_true", help="Paketinstallation ausdrücklich bestätigen")
+    performance_backup_group = performance_install.add_mutually_exclusive_group()
+    performance_backup_group.add_argument(
+        "--backup", dest="backup", action="store_true", help="Vorher vollständiges Server-Backup erstellen"
+    )
+    performance_backup_group.add_argument(
+        "--no-backup", dest="backup", action="store_false", help="Ohne vollständiges Server-Backup installieren"
+    )
+    performance_install.set_defaults(backup=None)
+
     resource_pack = sub.add_parser("resource-pack", help="Server-Ressourcenpaket in server.properties konfigurieren")
     resource_pack_sub = resource_pack.add_subparsers(dest="resource_pack_action", required=True)
     resource_pack_set = resource_pack_sub.add_parser("set", help="HTTPS-Ressourcenpaket setzen oder erzwingen")
@@ -958,6 +1064,10 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "mods":
             _ensure_setup(manager, store)
             _mods_command(manager, args)
+        elif args.command == "performance":
+            _ensure_setup(manager, store)
+            if args.performance_action == "install":
+                _performance_command(manager, args)
         elif args.command == "resource-pack":
             _ensure_setup(manager, store)
             _resource_pack_command(manager, args)

@@ -163,7 +163,14 @@ class ContentCatalogTests(unittest.TestCase):
 
     def test_modrinth_install_selects_latest_server_compatible_release_and_verifies_hash(self):
         checksum = "a" * 128
-        project = {"id": "abc123", "slug": "example-mod", "title": "Example Mod", "project_type": "mod"}
+        project = {
+            "id": "abc123",
+            "slug": "example-mod",
+            "title": "Example Mod",
+            "project_type": "mod",
+            "client_side": "optional",
+            "server_side": "required",
+        }
         versions = [
             {
                 "id": "alpha1",
@@ -199,6 +206,8 @@ class ContentCatalogTests(unittest.TestCase):
                 plan = catalog.prepare_install("modrinth", "mod", "abc123", profile)
             self.assertEqual(plan.file_version, "2.0.0")
             self.assertEqual(plan.required_dependencies, ("dependency1",))
+            self.assertEqual(plan.required_dependency_project_ids, ("dependency1",))
+            self.assertEqual((plan.client_side, plan.server_side), ("optional", "required"))
             def download_progress(_downloaded, _total):
                 pass
 
@@ -216,6 +225,41 @@ class ContentCatalogTests(unittest.TestCase):
             manifest = catalog.installed(profile)
             self.assertEqual(manifest[0]["project_id"], "abc123")
             self.assertEqual(manifest[0]["required_dependencies"], ["dependency1"])
+
+    def test_modrinth_accepts_plugin_classified_project_with_fabric_mod_version(self):
+        project = {
+            "id": "chunky-id",
+            "slug": "chunky",
+            "title": "Chunky",
+            "project_type": "plugin",
+            "client_side": "unsupported",
+            "server_side": "required",
+        }
+        versions = [
+            {
+                "id": "fabric-release",
+                "version_number": "1.5.0",
+                "version_type": "release",
+                "status": "listed",
+                "environment": "server_only",
+                "loaders": ["fabric"],
+                "game_versions": ["1.21.1"],
+                "files": [{
+                    "filename": "chunky-fabric.jar",
+                    "primary": True,
+                    "url": "https://cdn.modrinth.com/data/chunky-id/chunky-fabric.jar",
+                    "hashes": {"sha512": "a" * 128},
+                }],
+            }
+        ]
+        with tempfile.TemporaryDirectory() as temp:
+            profile = _profile(Path(temp))
+            with patch("minecraft_server_creator.catalog._request_json", side_effect=[project, versions]):
+                plan = ContentCatalog().prepare_install("modrinth", "mod", "chunky-id", profile)
+        self.assertEqual(plan.project_title, "Chunky")
+        self.assertEqual(plan.kind, "mod")
+        self.assertEqual(plan.client_side, "unsupported")
+        self.assertEqual(plan.server_side, "required")
 
     def test_modrinth_accepts_plugin_loader_versions_for_mixed_project_type(self):
         project = {"id": "plg123", "slug": "example-plugin", "title": "Example Plugin", "project_type": "mod"}

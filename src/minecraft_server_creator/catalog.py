@@ -63,6 +63,9 @@ class InstallPlan:
     required_dependencies: tuple[str, ...]
     minecraft_version: str
     release_channel: str = "release"
+    client_side: str | None = None
+    server_side: str | None = None
+    required_dependency_project_ids: tuple[str, ...] = ()
 
 
 SERVER_ENVIRONMENTS = frozenset(
@@ -361,7 +364,15 @@ class ModrinthCatalog:
         project_type = project.get("project_type")
         # Modrinth may report plugins (and some datapack projects) through the
         # primary "mod" project type. The selected version's loader is authoritative.
-        allowed_project_types = {"mod", "plugin"} if kind == "plugin" else {"mod", "datapack"}
+        if kind == "plugin":
+            allowed_project_types = {"mod", "plugin"}
+        elif kind == "mod":
+            # Multi-loader projects such as Chunky can be categorized as plugins
+            # while also publishing genuine Fabric/Forge mod files. The version's
+            # loader and server environment below remain authoritative.
+            allowed_project_types = {"mod", "plugin"}
+        else:
+            allowed_project_types = {"mod", "datapack"}
         if project_type not in allowed_project_types:
             raise CatalogError(f"Das angegebene Modrinth-Projekt ist kein {kind}.")
         params = {
@@ -409,13 +420,25 @@ class ModrinthCatalog:
             dependencies_data = version.get("dependencies")
             if not isinstance(dependencies_data, list):
                 dependencies_data = []
+            required_dependency_entries = [
+                dependency
+                for dependency in dependencies_data
+                if isinstance(dependency, dict) and dependency.get("dependency_type") == "required"
+            ]
             dependencies = tuple(
                 str(dependency.get("project_id") or dependency.get("file_name") or dependency.get("version_id"))
-                for dependency in dependencies_data
-                if isinstance(dependency, dict)
-                and dependency.get("dependency_type") == "required"
-                and (dependency.get("project_id") or dependency.get("file_name") or dependency.get("version_id"))
+                for dependency in required_dependency_entries
+                if dependency.get("project_id") or dependency.get("file_name") or dependency.get("version_id")
             )
+            dependency_project_ids = tuple(
+                dict.fromkeys(
+                    str(dependency["project_id"])
+                    for dependency in required_dependency_entries
+                    if isinstance(dependency.get("project_id"), str) and dependency["project_id"]
+                )
+            )
+            client_side = project.get("client_side")
+            server_side = project.get("server_side")
             return InstallPlan(
                 "modrinth",
                 kind,
@@ -431,6 +454,9 @@ class ModrinthCatalog:
                 dependencies,
                 profile.minecraft_version,
                 str(version.get("version_type")),
+                client_side.lower() if isinstance(client_side, str) else None,
+                server_side.lower() if isinstance(server_side, str) else None,
+                dependency_project_ids,
             )
         channel_message = "stabil oder Beta" if include_beta else "stabil"
         version_message = f" mit Versions-ID {version_id}" if version_id is not None else ""

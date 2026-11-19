@@ -189,6 +189,14 @@ class CliParserTests(unittest.TestCase):
         self.assertEqual((args.server, args.player, args.slot, args.item, args.count), ("home", "Alex", 5, "diamond", 3))
         self.assertTrue(args.yes)
 
+    def test_performance_install_arguments(self):
+        args = build_parser().parse_args(["performance", "install", "eriks-server", "--backup", "--yes"])
+        self.assertEqual(args.command, "performance")
+        self.assertEqual(args.performance_action, "install")
+        self.assertEqual(args.server, "eriks-server")
+        self.assertTrue(args.backup)
+        self.assertTrue(args.yes)
+
     def test_help_parser_has_expected_commands(self):
         parser = build_parser()
         choices = parser._subparsers._group_actions[0].choices
@@ -197,6 +205,7 @@ class CliParserTests(unittest.TestCase):
         self.assertIn("rcon", choices)
         self.assertIn("catalog", choices)
         self.assertIn("mods", choices)
+        self.assertIn("performance", choices)
         self.assertIn("resource-pack", choices)
         self.assertIn("geyser", choices)
         self.assertIn("world", choices)
