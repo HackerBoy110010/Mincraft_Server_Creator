@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
+import hashlib
+import json
 import tempfile
 import unittest
 import zipfile
@@ -184,12 +187,77 @@ class PerformancePackTests(unittest.TestCase):
             with self.assertRaisesRegex(PerformancePackError, "Spieler sie möglicherweise ebenfalls benötigen"):
                 prepare_performance_package(FakeCatalog(), profile)
 
-    def test_prepare_aborts_entire_package_if_a_main_mod_is_already_installed(self):
+    def test_prepare_reuses_verified_catalog_managed_main_mods(self):
+        with tempfile.TemporaryDirectory() as temp:
+            profile = _profile(Path(temp))
+            plans = {
+                spec.project_id: _plan(profile, spec.project_id, slug=spec.name.lower(), title=spec.name)
+                for spec in PERFORMANCE_MODS
+            }
+            existing_specs = {PERFORMANCE_MODS[index].project_id for index in (0, 1, 3)}
+            records = []
+            for spec in PERFORMANCE_MODS:
+                if spec.project_id not in existing_specs:
+                    continue
+                plan = plans[spec.project_id]
+                path = Path(profile.server_dir) / "mods" / plan.file_name
+                with zipfile.ZipFile(path, "w") as archive:
+                    archive.writestr(
+                        "fabric.mod.json",
+                        json.dumps({"id": spec.mod_ids[0], "version": plan.file_version}),
+                    )
+                digest = hashlib.sha512(path.read_bytes()).hexdigest()
+                plans[spec.project_id] = replace(plan, checksum=digest)
+                records.append(
+                    {
+                        "source": "modrinth",
+                        "kind": "mod",
+                        "project_id": spec.project_id,
+                        "file_name": path.name,
+                        "file_version": plan.file_version,
+                        "release_channel": "release",
+                        "path": f"mods/{path.name}",
+                        "minecraft_version": profile.minecraft_version,
+                        "loader": "fabric",
+                        "checksum": digest,
+                        "algorithm": "sha512",
+                    }
+                )
+
+            class FakeCatalog:
+                @staticmethod
+                def installed(_profile):
+                    return records
+
+                @staticmethod
+                def prepare_install(_source, _kind, project_id, _profile):
+                    return plans[project_id]
+
+            prepared = prepare_performance_package(FakeCatalog(), profile)
+            self.assertEqual(
+                set(prepared.already_installed),
+                {
+                    "Lithium 1.0.0 (Datei und Katalogrelease geprüft)",
+                    "FerriteCore 1.0.0 (Datei und Katalogrelease geprüft)",
+                    "Krypton 1.0.0 (Datei und Katalogrelease geprüft)",
+                },
+            )
+            self.assertEqual(
+                {item.plan.project_id for item in prepared.plans},
+                {spec.project_id for spec in PERFORMANCE_MODS if spec.project_id not in existing_specs},
+            )
+            self.assertTrue(all(path.is_file() for path in (Path(profile.server_dir) / "mods").glob("*.jar")))
+
+    def test_prepare_rejects_unmanaged_existing_main_mod(self):
         with tempfile.TemporaryDirectory() as temp:
             profile = _profile(Path(temp))
             jar_path = Path(profile.server_dir) / "mods" / "lithium-local.jar"
             with zipfile.ZipFile(jar_path, "w") as archive:
                 archive.writestr("fabric.mod.json", '{"id":"lithium","version":"local"}')
+            plans = {
+                spec.project_id: _plan(profile, spec.project_id, slug=spec.name.lower(), title=spec.name)
+                for spec in PERFORMANCE_MODS
+            }
 
             class FakeCatalog:
                 @staticmethod
@@ -197,10 +265,10 @@ class PerformancePackTests(unittest.TestCase):
                     return []
 
                 @staticmethod
-                def prepare_install(*_args):
-                    raise AssertionError("No versions should be prepared after detecting a conflicting existing mod")
+                def prepare_install(_source, _kind, project_id, _profile):
+                    return plans[project_id]
 
-            with self.assertRaisesRegex(PerformancePackError, "gesamte Performance-Paket wurde abgelehnt"):
+            with self.assertRaisesRegex(PerformancePackError, "nicht als unverändertes, katalogverwaltetes"):
                 prepare_performance_package(FakeCatalog(), profile)
             self.assertTrue(jar_path.is_file())
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from io import BytesIO
+import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -134,10 +135,10 @@ def _installed_fabric_mod_ids(profile: ServerProfile) -> set[str]:
     return mod_ids
 
 
-def _installed_project_ids(catalog: ContentCatalog, profile: ServerProfile) -> set[str]:
+def _installed_project_ids(records: list[dict[str, object]], profile: ServerProfile) -> set[str]:
     root = Path(profile.server_dir).resolve()
     installed: set[str] = set()
-    for record in catalog.installed(profile):
+    for record in records:
         if record.get("kind") != "mod":
             continue
         project_id = record.get("project_id")
@@ -145,12 +146,98 @@ def _installed_project_ids(catalog: ContentCatalog, profile: ServerProfile) -> s
         if not isinstance(project_id, str) or not isinstance(relative, str):
             continue
         parts = PurePosixPath(relative).parts
-        if len(parts) != 2 or parts[0] != "mods" or parts[1] in {"", ".", ".."}:
+        if len(parts) != 2 or parts[0] != "mods" or parts[1] in {"", ".", ".."} or "\\" in parts[1]:
             continue
         path = root / parts[0] / parts[1]
         if path.is_file() and not path.is_symlink():
             installed.add(project_id)
     return installed
+
+
+def _existing_managed_main_mod(
+    records: list[dict[str, object]],
+    profile: ServerProfile,
+    spec: PerformanceMod,
+    plan: InstallPlan,
+) -> str | None:
+    """Verify and return an existing, unchanged catalog-managed copy of a pack mod."""
+    root = Path(profile.server_dir).resolve()
+    matches = [
+        record
+        for record in records
+        if record.get("kind") == "mod" and record.get("project_id") == spec.project_id
+    ]
+    active: list[tuple[dict[str, object], Path]] = []
+    for record in matches:
+        relative = record.get("path")
+        if not isinstance(relative, str):
+            raise PerformancePackError(f"{spec.name}: der vorhandene Katalogeintrag enthält keinen sicheren Dateipfad.")
+        parts = PurePosixPath(relative).parts
+        if len(parts) != 2 or parts[0] != "mods" or parts[1] in {"", ".", ".."} or "\\" in parts[1]:
+            raise PerformancePackError(f"{spec.name}: der vorhandene Katalogeintrag verweist nicht sicher auf eine Mod-Datei.")
+        path = root / parts[0] / parts[1]
+        if path.is_symlink():
+            raise PerformancePackError(f"{spec.name}: die vorhandene Mod-Datei darf kein symbolischer Link sein.")
+        if path.exists():
+            if not path.is_file() or path.resolve().parent != (root / "mods").resolve():
+                raise PerformancePackError(f"{spec.name}: die vorhandene Mod-Datei liegt nicht sicher im mods-Ordner.")
+            active.append((record, path))
+
+    if len(active) > 1:
+        raise PerformancePackError(f"{spec.name}: mehrere aktive Katalogdateien gefunden; das Paket wurde abgelehnt.")
+    if not active:
+        if matches:
+            raise PerformancePackError(
+                f"{spec.name}: ein veralteter Katalogeintrag existiert, dessen Datei fehlt. "
+                "Bereinige diesen Eintrag, bevor du das Performance-Paket installierst."
+            )
+        return None
+
+    record, path = active[0]
+    expected_fields = {
+        "source": "modrinth",
+        "kind": "mod",
+        "project_id": spec.project_id,
+        "file_name": path.name,
+        "file_version": plan.file_version,
+        "release_channel": "release",
+        "minecraft_version": profile.minecraft_version,
+        "loader": "fabric",
+    }
+    mismatches = [key for key, value in expected_fields.items() if record.get(key) != value]
+    algorithm = record.get("algorithm")
+    checksum = record.get("checksum")
+    if algorithm != plan.algorithm or not isinstance(checksum, str) or checksum.lower() != plan.checksum.lower():
+        mismatches.append("Prüfsumme/Version")
+    if mismatches:
+        raise PerformancePackError(
+            f"{spec.name} ist vorhanden, entspricht aber nicht exakt dem aktuell ausgewählten stabilen, "
+            f"serverfähigen Release ({', '.join(mismatches)}). Das gesamte Paket wurde vor Änderungen abgelehnt."
+        )
+    if not isinstance(algorithm, str) or algorithm not in {"sha1", "sha512"}:
+        raise PerformancePackError(f"{spec.name}: der Prüfsummenalgorithmus des vorhandenen Mods ist ungültig.")
+
+    digest = hashlib.new(algorithm)
+    try:
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError as exc:
+        raise PerformancePackError(f"{spec.name}: vorhandene Datei kann nicht geprüft werden: {exc}") from exc
+    if digest.hexdigest().lower() != checksum.lower():
+        raise PerformancePackError(
+            f"{spec.name}: die vorhandene Datei wurde seit der Kataloginstallation verändert. "
+            "Das gesamte Paket wurde vor Änderungen abgelehnt."
+        )
+
+    try:
+        with zipfile.ZipFile(path) as archive:
+            actual_ids = _read_mod_ids_from_archive(archive)
+    except (OSError, zipfile.BadZipFile) as exc:
+        raise PerformancePackError(f"{spec.name}: vorhandene JAR kann nicht sicher geprüft werden: {exc}") from exc
+    if not _matches_mod_ids(spec.mod_ids, spec.mod_id_prefixes, actual_ids):
+        raise PerformancePackError(f"{spec.name}: die vorhandene JAR enthält nicht die erwartete Fabric-Mod-ID.")
+    return plan.file_version
 
 
 def _matches_mod_ids(expected: tuple[str, ...], prefixes: tuple[str, ...], installed: set[str]) -> bool:
@@ -189,7 +276,8 @@ def prepare_performance_package(
     if profile.server_type != "fabric":
         raise PerformancePackError("Das Performance-Paket ist ausschließlich für reine Fabric-Serverprofile vorgesehen.")
 
-    managed_projects = _installed_project_ids(catalog, profile)
+    installed_records = catalog.installed(profile)
+    managed_projects = _installed_project_ids(installed_records, profile)
     installed_mod_ids = _installed_fabric_mod_ids(profile)
     planned: list[PlannedPerformanceMod] = []
     already_installed: list[str] = []
@@ -197,12 +285,6 @@ def prepare_performance_package(
     dependency_queue: list[str] = []
 
     for spec in PERFORMANCE_MODS:
-        if spec.project_id in managed_projects or _matches_mod_ids(spec.mod_ids, spec.mod_id_prefixes, installed_mod_ids):
-            raise PerformancePackError(
-                f"{spec.name} ist bereits in diesem Profil vorhanden. Die vorhandene Datei wird nicht "
-                "überschrieben; das gesamte Performance-Paket wurde abgelehnt, bevor Dateien geändert wurden. "
-                "Prüfe die vorhandene Version zuerst und verwende für spätere Updates den Mod-Updater."
-            )
         try:
             plan = catalog.prepare_install("modrinth", "mod", spec.project_id, profile)
         except NoCompatibleVersionError as exc:
@@ -212,14 +294,25 @@ def prepare_performance_package(
                 "abgelehnt; es wurde nichts installiert."
             ) from exc
         _require_safe_plan(plan, context=spec.name)
+        existing_version = _existing_managed_main_mod(installed_records, profile, spec, plan)
+        if existing_version is not None:
+            already_installed.append(f"{spec.name} {existing_version} (Datei und Katalogrelease geprüft)")
+            planned_project_ids.add(plan.project_id)
+        elif _matches_mod_ids(spec.mod_ids, spec.mod_id_prefixes, installed_mod_ids):
+            raise PerformancePackError(
+                f"{spec.name} ist bereits vorhanden, aber nicht als unverändertes, katalogverwaltetes "
+                "Modrinth-Release verifiziert. Das gesamte Performance-Paket wurde vor Änderungen "
+                "abgelehnt; entferne oder aktualisiere den Konflikt erst nach einer Sicherung."
+            )
+        else:
+            planned.append(PlannedPerformanceMod(plan))
+            planned_project_ids.add(plan.project_id)
         unresolved = _recorded_unresolvable_dependencies(plan)
         if unresolved:
             raise PerformancePackError(
                 f"{spec.name} nennt Abhängigkeiten, die nicht automatisch über eine Modrinth-Projekt-ID "
                 f"aufgelöst werden können: {', '.join(unresolved)}. Es wurde noch nichts installiert."
             )
-        planned.append(PlannedPerformanceMod(plan))
-        planned_project_ids.add(plan.project_id)
         dependency_queue.extend(plan.required_dependency_project_ids)
 
     processed_dependencies: set[str] = set()

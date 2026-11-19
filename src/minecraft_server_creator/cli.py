@@ -564,11 +564,11 @@ def _performance_command(manager: ServerManager, args: argparse.Namespace) -> No
     print("Prüfe stabile, serverfähige Modrinth-Releases und notwendige Abhängigkeiten:", flush=True)
     prepared = prepare_performance_package(catalog, profile)
     if prepared.already_installed:
-        print("Bereits vorhanden, wird nicht überschrieben:")
+        print("Bereits vorhanden und wird nicht überschrieben:")
         for name in prepared.already_installed:
             print(f"- {name}")
     if not prepared.plans:
-        print("Es gibt keine passenden stabilen Performance-Mods zu installieren; Serverdateien blieben unverändert.")
+        print("Alle sechs Performance-Mods sind bereits als passende stabile, serverfähige Releases vorhanden; nichts zu installieren.")
         return
 
     print(f"Geplante Installation für {profile.name} (Minecraft {profile.minecraft_version}, Fabric):")
